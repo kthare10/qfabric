@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+# Ignore results CONTENTS (not the dir) so the sample-result exceptions below work.
+results/*
+secrets/
+*.json
+!p4/**/*.json
+# Keep the bundled sample results so the analysis notebook runs without a slice
+!results/fabric_alice_results.json
+!results/fabric_bob_results.json
+*.pcap
+
+# Personal session tracking — never ship in the artifact
+cc-usage-log.md
+
+# P4 build artifacts
+p4/bmv2/*.json
+p4/bmv2/**/*.json
+p4/tna/build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# BMv2 logs
+*.log
+
+# Vagrant
+.vagrant/

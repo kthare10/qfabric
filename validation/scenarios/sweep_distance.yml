@@ -1,0 +1,12 @@
+sweep:
+  parameter: distance_km
+  values: [1, 5, 10, 20, 50, 100]
+
+base:
+  attenuation_db_per_km: 0.2
+  detector_efficiency: 0.8
+  dark_count_rate_hz: 10.0
+  polarization_fidelity: 0.98  # ~1% intrinsic QBER (realistic optics misalignment)
+  num_photons: 100000
+  sample_fraction: 0.1
+  seed: 42

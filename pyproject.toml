@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qfabric"
+version = "0.1.0"
+description = "Quantum Network Emulation Platform on FABRIC"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Komal Thareja", email = "kthare10@renci.org"},
+]
+
+dependencies = [
+    "pyyaml>=6.0",
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+sequence = ["sequence==1.0.0"]  # install into a dedicated Python 3.12 env (scripts/setup_sequence_env.sh)
+netsquid = []  # Installed via NetSquid's own channel
+fabric = ["fabrictestbed-extensions>=1.6"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1",
+]
+
+[project.scripts]
+qfabric-alice = "qne.cli:main_alice"
+qfabric-bob = "qne.cli:main_bob"
+
+[tool.setuptools.packages.find]
+include = ["qne*", "validation*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

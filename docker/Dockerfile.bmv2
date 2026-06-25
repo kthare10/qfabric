@@ -1,0 +1,50 @@
+# Dockerfile.bmv2 — BMv2 + QFabric development environment
+# Based on Rocky 9 for FABRIC compatibility.
+FROM rockylinux:9
+
+LABEL maintainer="QFabric Team"
+LABEL description="BMv2 software switch + QFabric quantum node emulator"
+
+# Install system dependencies
+RUN dnf install -y epel-release && \
+    dnf groupinstall -y "Development Tools" && \
+    dnf install -y \
+        automake cmake gcc-c++ git libtool \
+        python3 python3-pip python3-devel \
+        boost-devel gc-devel bison flex gmp-devel \
+        libpcap-devel pkgconf tcpdump iproute ethtool && \
+    dnf clean all
+
+# Build and install BMv2
+WORKDIR /opt
+RUN git clone --depth 1 https://github.com/p4lang/behavioral-model.git && \
+    cd behavioral-model && \
+    ./install_deps.sh && \
+    ./autogen.sh && \
+    ./configure --enable-debugger && \
+    make -j"$(nproc)" && \
+    make install && \
+    ldconfig
+
+# Build and install p4c
+RUN git clone --recursive --depth 1 https://github.com/p4lang/p4c.git && \
+    cd p4c && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make -j"$(nproc)" && \
+    make install
+
+# Install Python dependencies
+COPY pyproject.toml /opt/qfabric/
+WORKDIR /opt/qfabric
+RUN pip3 install --no-cache-dir ".[dev]" ptf scapy
+
+# Copy project files
+COPY . /opt/qfabric/
+RUN pip3 install --no-cache-dir -e .
+
+# Make scripts executable
+RUN chmod +x scripts/*.sh
+
+WORKDIR /opt/qfabric
+CMD ["/bin/bash"]

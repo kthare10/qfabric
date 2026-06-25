@@ -1,0 +1,16 @@
+name: baseline_1km
+channel:
+  distance_km: 1.0
+  attenuation_db_per_km: 0.2
+  polarization_fidelity: 0.98  # ~1% intrinsic QBER (realistic optics misalignment)
+detector:
+  efficiency: 0.8
+  dark_count_rate: 10.0   # Hz
+  dead_time: 0.0
+  timing_jitter: 0.0
+protocol:
+  num_photons: 100000
+  send_rate_hz: 1000000.0
+  sample_fraction: 0.1
+  wavelength: 0
+seed: 42

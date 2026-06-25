@@ -1,0 +1,15 @@
+# QFabric core runtime dependencies (the primary environment — use Python 3.11).
+# For a full editable install (with console scripts) use:  pip install -e .
+#
+# Cross-validation backends (notebook 3) — see README "Cross-Validation":
+#   * NetSquid runs in THIS (primary, 3.11) env:  pip install netsquid
+#     (register at https://netsquid.org for the index/credentials first)
+#   * SeQUeNCe 1.0 needs Python >=3.12, which conflicts with NetSquid (<=3.11),
+#     so it lives in its OWN venv. Create it with:
+#         bash scripts/setup_sequence_env.sh
+#     then point the comparison at it via QFABRIC_SEQUENCE_PYTHON.
+
+pyyaml>=6.0
+numpy>=1.24
+matplotlib>=3.7
+pandas>=2.0

@@ -1,0 +1,154 @@
+name: qfabric-fabric
+
+sites:
+  - kind: fabric
+    # Path to your FABRIC credentials (fabric_rc). On FABRIC JupyterHub this is
+    # typically ${HOME}/work/fabric_config/fabric_rc. Override with the
+    # FABRIC_RC environment variable, or edit this line to point at your file.
+    rc_file: ${FABRIC_RC:-${HOME}/work/fabric_config/fabric_rc}
+    walltime: "04:00:00"
+    resources:
+      machines:
+        - labels: [alice]
+          site: TACC
+          image: default_ubuntu_22
+          flavour: large
+          number: 1
+        - labels: [bob]
+          site: STAR
+          image: default_ubuntu_22
+          flavour: large
+          number: 1
+        - labels: [switch]
+          site: TACC
+          image: default_ubuntu_22
+          flavour: large
+          number: 1
+      networks:
+        - labels: [net-alice-switch]
+          kind: L2Bridge
+          site: TACC
+        - labels: [net-switch-bob]
+          kind: L2STS
+          site_1: TACC
+          site_2: STAR
+
+experiments:
+  - kind: shell
+    name: qfabric-bb84-fabric
+    description: Run BB84 QKD across FABRIC sites with BMv2 quantum channel
+
+    inputs:
+      - labels: [alice, bob, switch]
+        src: ../
+        dst: ~/qfabric
+      - labels: [alice, bob, switch]
+        src: ../validation/scenarios/baseline_1km.yml
+        dst: ~/qfabric/scenario.yml
+
+    scripts:
+      # Install BMv2 on switch node
+      - labels: [switch]
+        script: |
+          #!/bin/bash
+          set -euo pipefail
+          cd ~/qfabric
+          bash scripts/install_bmv2.sh
+
+      # Install Python deps on Alice and Bob
+      - labels: [alice, bob]
+        script: |
+          #!/bin/bash
+          set -euo pipefail
+          cd ~/qfabric
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install pyyaml numpy
+
+      # Compile P4 and start BMv2 switch
+      - labels: [switch]
+        script: |
+          #!/bin/bash
+          set -euo pipefail
+          cd ~/qfabric
+
+          # Determine data-plane interfaces
+          # These are the interfaces attached to the L2 networks
+          IFACE_ALICE=$(ip -o link show | grep -v lo | grep -v eth0 | awk -F': ' 'NR==1{print $2}')
+          IFACE_BOB=$(ip -o link show | grep -v lo | grep -v eth0 | awk -F': ' 'NR==2{print $2}')
+
+          # Compile P4
+          p4c-bm2 --std p4-16 \
+            -o p4/bmv2/quantum_channel.json \
+            -I p4/bmv2/includes \
+            p4/bmv2/quantum_channel.p4
+
+          # Start BMv2
+          sudo simple_switch \
+            --interface 0@${IFACE_ALICE} \
+            --interface 1@${IFACE_BOB} \
+            --log-level warn \
+            p4/bmv2/quantum_channel.json &
+          sleep 3
+
+          # Configure tables (1km @ 0.2 dB/km threshold)
+          echo "table_add quantum_channel_params set_channel_params 0 => 193273528 1" | \
+            simple_switch_CLI --thrift-port 9090
+
+          # L2 forwarding for classical traffic
+          echo "table_add l2_forwarding l2_forward 0x020000000002 => 1" | \
+            simple_switch_CLI --thrift-port 9090
+          echo "table_add l2_forwarding l2_forward 0x020000000001 => 0" | \
+            simple_switch_CLI --thrift-port 9090
+
+          echo "BMv2 switch configured and running"
+
+      # Start Bob (receiver) — runs in background
+      - labels: [bob]
+        script: |
+          #!/bin/bash
+          set -euo pipefail
+          cd ~/qfabric
+          source .venv/bin/activate
+
+          # Determine data-plane interface
+          DATA_IFACE=$(ip -o link show | grep -v lo | grep -v eth0 | awk -F': ' 'NR==1{print $2}')
+
+          mkdir -p results
+          python3 -m qne.cli bob \
+            --config scenario.yml \
+            --interface ${DATA_IFACE} \
+            --output results/bob_results.json &
+          echo "Bob started on ${DATA_IFACE}"
+
+      # Start Alice (sender)
+      - labels: [alice]
+        script: |
+          #!/bin/bash
+          set -euo pipefail
+          cd ~/qfabric
+          source .venv/bin/activate
+
+          # Determine data-plane interface
+          DATA_IFACE=$(ip -o link show | grep -v lo | grep -v eth0 | awk -F': ' 'NR==1{print $2}')
+
+          # Get Bob's management IP for classical channel
+          # This should be passed as a variable in production
+          BOB_HOST="${BOB_MGMT_IP:-127.0.0.1}"
+
+          sleep 2
+          mkdir -p results
+          python3 -m qne.cli alice \
+            --config scenario.yml \
+            --interface ${DATA_IFACE} \
+            --bob-host ${BOB_HOST} \
+            --output results/alice_results.json
+          echo "Alice completed"
+
+    outputs:
+      - labels: [alice]
+        src: ~/qfabric/results/alice_results.json
+        dst: output
+      - labels: [bob]
+        src: ~/qfabric/results/bob_results.json
+        dst: output
