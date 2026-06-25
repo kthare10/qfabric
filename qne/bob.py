@@ -84,6 +84,10 @@ class Bob:
         # Phase 2: Classical sifting
         self._run_sifting()
 
+        # Bob doesn't transmit, but it knows the intended photon count from the
+        # scenario — record it so the result reports photons_sent / loss_rate
+        # correctly (otherwise photons_sent would be 0 and loss_rate negative).
+        self.collector.record_sent(self.config.protocol.num_photons)
         metrics = self.collector.finalize()
         print(f"\n=== Bob Results ===")
         print(f"  Photons received (raw): {len(self.detection_log)}")

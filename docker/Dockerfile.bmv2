@@ -1,21 +1,35 @@
-# Dockerfile.bmv2 — BMv2 + QFabric development environment
-# Based on Rocky 9 for FABRIC compatibility.
-FROM rockylinux:9
+# Dockerfile.bmv2 — prebuilt BMv2 (simple_switch) + p4c (p4c-bm2-ss) image.
+#
+# Building BMv2 + p4c from source takes many minutes; this image bakes them in
+# once (in CI) so a FABRIC switch node only has to `docker pull` and run.
+# Published to GHCR by .github/workflows/build-bmv2.yml as
+#   ghcr.io/kthare10/qfabric-bmv2:latest
+#
+# Build locally:  docker build -f docker/Dockerfile.bmv2 -t qfabric-bmv2 .
+# Run the switch: docker run -d --name bmv2 --privileged --network host \
+#                   -v $HOME/qfabric:/work qfabric-bmv2 \
+#                   simple_switch --interface 0@<ifaceA> --interface 1@<ifaceB> \
+#                   --log-level warn /work/p4/bmv2/quantum_channel.json
+#
+# Ubuntu 22.04 base: p4lang's install_deps.sh targets Debian/Ubuntu, so the build
+# is reliable here (unlike a Rocky base).
+FROM ubuntu:22.04
 
-LABEL maintainer="QFabric Team"
-LABEL description="BMv2 software switch + QFabric quantum node emulator"
+LABEL org.opencontainers.image.title="qfabric-bmv2"
+LABEL org.opencontainers.image.description="BMv2 simple_switch + p4c (bmv2 backend) for QFabric"
+LABEL org.opencontainers.image.source="https://github.com/kthare10/qfabric"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
 
-# Install system dependencies
-RUN dnf install -y epel-release && \
-    dnf groupinstall -y "Development Tools" && \
-    dnf install -y \
-        automake cmake gcc-c++ git libtool \
-        python3 python3-pip python3-devel \
-        boost-devel gc-devel bison flex gmp-devel \
-        libpcap-devel pkgconf tcpdump iproute ethtool && \
-    dnf clean all
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Build and install BMv2
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates git build-essential automake libtool pkg-config \
+        cmake bison flex python3 python3-pip \
+        libgmp-dev libpcap-dev libboost-all-dev libgc-dev libssl-dev \
+        libjsoncpp-dev libtool-bin iproute2 ethtool tcpdump sudo && \
+    rm -rf /var/lib/apt/lists/*
+
+# --- behavioral-model (BMv2: simple_switch, simple_switch_CLI) ---
 WORKDIR /opt
 RUN git clone --depth 1 https://github.com/p4lang/behavioral-model.git && \
     cd behavioral-model && \
@@ -26,25 +40,16 @@ RUN git clone --depth 1 https://github.com/p4lang/behavioral-model.git && \
     make install && \
     ldconfig
 
-# Build and install p4c
+# --- p4c (provides p4c-bm2-ss, the BMv2 backend compiler) ---
 RUN git clone --recursive --depth 1 https://github.com/p4lang/p4c.git && \
-    cd p4c && \
-    mkdir build && cd build && \
-    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    cd p4c && mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release \
+        -DENABLE_BMV2=ON -DENABLE_EBPF=OFF -DENABLE_UBPF=OFF \
+        -DENABLE_DPDK=OFF -DENABLE_P4TC=OFF -DENABLE_GTESTS=OFF && \
     make -j"$(nproc)" && \
-    make install
+    make install && \
+    ldconfig && \
+    rm -rf /opt/p4c/build/CMakeFiles
 
-# Install Python dependencies
-COPY pyproject.toml /opt/qfabric/
-WORKDIR /opt/qfabric
-RUN pip3 install --no-cache-dir ".[dev]" ptf scapy
-
-# Copy project files
-COPY . /opt/qfabric/
-RUN pip3 install --no-cache-dir -e .
-
-# Make scripts executable
-RUN chmod +x scripts/*.sh
-
-WORKDIR /opt/qfabric
+WORKDIR /work
 CMD ["/bin/bash"]

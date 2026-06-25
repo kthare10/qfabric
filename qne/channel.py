@@ -119,13 +119,19 @@ class ClassicalClient:
         host: str,
         port: int = 5100,
         timeout: float = 30.0,
-        max_retries: int = 30,
+        max_retries: int = 60,
         retry_delay: float = 2.0,
+        data_timeout: float = 600.0,
     ) -> ClassicalChannel:
         """Connect to Bob's classical channel server with retries.
 
         Retries with fixed delay to handle the case where Bob is still
         receiving photons and hasn't started the classical server yet.
+
+        `timeout` bounds each connect attempt; once connected, the socket is
+        given the larger `data_timeout` for the sifting exchange — large basis
+        lists (e.g. 100k photons) can take well over 30 s to transfer over the
+        emulated (BMv2) data-plane path.
         """
         import time
 
@@ -140,6 +146,7 @@ class ClassicalClient:
                     sock = socket.socket(family, socktype, proto)
                     sock.settimeout(timeout)
                     sock.connect(sockaddr)
+                    sock.settimeout(data_timeout)  # generous timeout for the sifting exchange
                     return ClassicalChannel(sock)
                 except OSError as e:
                     last_err = e

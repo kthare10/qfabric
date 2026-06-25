@@ -106,6 +106,19 @@ python scripts/deploy_fabric.py --cleanup    # tear down the slice
 
 Provisions a 3-node slice (Alice / switch / Bob), installs BMv2, compiles the P4 program, and runs BB84 end-to-end. Results land in `results/`.
 
+#### Faster switch setup with a prebuilt BMv2 image (optional)
+
+Building BMv2 + p4c from source on the switch takes several minutes per slice. To skip it, use the prebuilt image (`docker/Dockerfile.bmv2`, published to GHCR by `.github/workflows/build-bmv2.yml`):
+
+```bash
+# on the switch node — install Docker + pull the image (one-time)
+bash scripts/setup_switch_docker.sh           # ghcr.io/kthare10/qfabric-bmv2:latest
+# then, in your JupyterHub kernel, enable the Docker path before configuring the switch:
+export QFABRIC_BMV2_IMAGE=ghcr.io/kthare10/qfabric-bmv2:latest
+```
+
+When `QFABRIC_BMV2_IMAGE` is set, `deploy_fabric.configure_switch` compiles the P4 and runs `simple_switch` inside that container (`--privileged --network host`) instead of building from source. Unset it to fall back to the source build.
+
 ## Key Parameters
 
 The fiber loss model is `P(loss) = 1 − 10^(−α·L/10)`, where `α` is attenuation (dB/km) and `L` is distance (km). The P4 switch compares a per-packet 32-bit random number against `floor(P(loss) · 2³²)`.

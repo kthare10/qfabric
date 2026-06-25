@@ -422,67 +422,10 @@ def configure_switch(slice_obj, threshold: int):
     print(f"  Alice MAC: {alice_mac}")
     print(f"  Bob MAC:   {bob_mac}")
 
-    # Compile P4
-    print("  Compiling P4 program...")
-    stdout, stderr = switch.execute(
-        "cd ~/qfabric && "
-        "export PATH=/usr/local/bin:$PATH && "
-        "p4c-bm2-ss --std p4-16 "
-        "-o p4/bmv2/quantum_channel.json "
-        "-I p4/bmv2/includes "
-        "p4/bmv2/quantum_channel.p4",
-        quiet=True,
-    )
-    print("  P4 compiled")
-
-    # Kill any old BMv2 and clean up systemd unit
-    print("  Starting BMv2...")
-    switch.execute(
-        "sudo systemctl stop bmv2 2>/dev/null; "
-        "sudo systemctl reset-failed bmv2 2>/dev/null; "
-        "sudo pkill -f simple_switch 2>/dev/null; "
-        "sleep 2",
-        quiet=True,
-    )
-
-    # Find the simple_switch binary (may be in /usr/local/bin)
-    ss_path_out, _ = switch.execute("which simple_switch 2>/dev/null || find /usr/local/bin /usr/bin -name simple_switch 2>/dev/null | head -1", quiet=True)
-    ss_path = ss_path_out.strip() or "/usr/local/bin/simple_switch"
-    print(f"  simple_switch path: {ss_path}")
-
-    # Use a systemd-run approach to start BMv2 as a proper background service
-    # This avoids the SSH execute() hang with nohup + background processes
-    # Resolve the uploaded path from the node's actual home (works for any image
-    # / default user — e.g. rocky vs ubuntu).
-    home_out, _ = switch.execute("echo $HOME", quiet=True)
-    json_path = f"{home_out.strip()}/qfabric/p4/bmv2/quantum_channel.json"
-    switch.execute(
-        f"sudo systemd-run --unit=bmv2 --remain-after-exit "
-        f"{ss_path} "
-        f"--interface 0@{iface_alice} --interface 1@{iface_bob} "
-        f"--log-level warn "
-        f"{json_path}",
-        quiet=True,
-    )
-    time.sleep(3)
-    stdout, _ = switch.execute("pgrep -a simple_switch", quiet=True)
-    print(f"  BMv2 process: {stdout.strip()}")
-
-    # Verify BMv2 is actually running
-    ps_out, _ = switch.execute("pgrep -a simple_switch", quiet=True)
-    if not ps_out.strip():
-        print("  ERROR: BMv2 failed to start!")
-        log_out, _ = switch.execute("sudo journalctl -u bmv2 --no-pager -n 20 2>/dev/null", quiet=True)
-        print(f"  Journal: {log_out.strip()}")
-        raise RuntimeError("BMv2 failed to start")
-
-    # Configure tables
-    print("  Configuring tables...")
+    # Switch-port MACs (used for src-MAC rewriting; FABRIC's OVS drops frames with
+    # unexpected source MACs). Shared by both the source-build and Docker paths.
     alice_mac_hex = "0x" + alice_mac.replace(":", "")
     bob_mac_hex = "0x" + bob_mac.replace(":", "")
-
-    # Get switch port MACs for source MAC rewriting
-    # (FABRIC's underlying OVS drops frames with unexpected source MACs)
     sw_alice_mac = switch.get_interface(network_name="net_alice_switch").get_mac()
     sw_bob_mac = switch.get_interface(network_name="net_switch_bob").get_mac()
     sw_alice_mac_hex = "0x" + sw_alice_mac.replace(":", "")
@@ -490,31 +433,84 @@ def configure_switch(slice_obj, threshold: int):
     print(f"  Switch Alice-side MAC: {sw_alice_mac}")
     print(f"  Switch Bob-side MAC:   {sw_bob_mac}")
 
-    # Quantum channel: wavelength 0 → threshold, forward to port 1 (Bob),
-    # rewrite src MAC to switch's Bob-side MAC, dst MAC to Bob's actual MAC
-    switch.execute(
-        f'echo "table_add quantum_channel_params set_channel_params 0 => {threshold} 1 {sw_bob_mac_hex} {bob_mac_hex}" | '
-        f"/usr/local/bin/simple_switch_CLI --thrift-port 9090",
-        quiet=True,
-    )
-    # Port-based forwarding for non-photon traffic:
-    # Port 0 (Alice side) → forward to port 1 (Bob side),
-    #   src=switch Bob-side MAC, dst=Bob's actual MAC
-    switch.execute(
-        f'echo "table_add port_forwarding port_forward 0 => 1 {sw_bob_mac_hex} {bob_mac_hex}" | '
-        f"/usr/local/bin/simple_switch_CLI --thrift-port 9090",
-        quiet=True,
-    )
-    # Port 1 (Bob side) → forward to port 0 (Alice side),
-    #   src=switch Alice-side MAC, dst=Alice's actual MAC
-    switch.execute(
-        f'echo "table_add port_forwarding port_forward 1 => 0 {sw_alice_mac_hex} {alice_mac_hex}" | '
-        f"/usr/local/bin/simple_switch_CLI --thrift-port 9090",
-        quiet=True,
-    )
+    home_out, _ = switch.execute("echo $HOME", quiet=True)
+    home = home_out.strip()
+    json_rel = "p4/bmv2/quantum_channel.json"
+    image = os.environ.get("QFABRIC_BMV2_IMAGE", "").strip()
+
+    if image:
+        # ---- Prebuilt Docker image: no per-deploy source build ----
+        # Set up the switch with `scripts/setup_switch_docker.sh` (installs Docker
+        # + pulls the image) first; export QFABRIC_BMV2_IMAGE to enable this path.
+        print(f"  Using BMv2 Docker image: {image}")
+        print("  Compiling P4 (in container)...")
+        switch.execute(
+            f"sudo docker run --rm -v {home}/qfabric:/work {image} "
+            f"p4c-bm2-ss --std p4-16 -o /work/{json_rel} "
+            f"-I /work/p4/bmv2/includes /work/p4/bmv2/quantum_channel.p4",
+            quiet=True,
+        )
+        print("  Starting BMv2 (container: --privileged --network host)...")
+        switch.execute(
+            "sudo docker rm -f bmv2 2>/dev/null; "
+            f"sudo docker run -d --name bmv2 --privileged --network host "
+            f"-v {home}/qfabric:/work {image} "
+            f"simple_switch --interface 0@{iface_alice} --interface 1@{iface_bob} "
+            f"--log-level warn /work/{json_rel}",
+            quiet=True,
+        )
+        time.sleep(4)
+        ps_out, _ = switch.execute(
+            "sudo docker exec bmv2 pgrep -a simple_switch 2>/dev/null || true", quiet=True)
+        if "simple_switch" not in ps_out:
+            log_out, _ = switch.execute("sudo docker logs --tail 20 bmv2 2>&1 || true", quiet=True)
+            print(f"  ERROR: BMv2 container not running!\n  Logs: {log_out.strip()}")
+            raise RuntimeError("BMv2 (docker) failed to start")
+        cli = "sudo docker exec -i bmv2 simple_switch_CLI"
+    else:
+        # ---- Build-from-source path (p4c-bm2-ss + systemd-run) ----
+        print("  Compiling P4 program...")
+        switch.execute(
+            "cd ~/qfabric && export PATH=/usr/local/bin:$PATH && "
+            f"p4c-bm2-ss --std p4-16 -o {json_rel} -I p4/bmv2/includes "
+            "p4/bmv2/quantum_channel.p4",
+            quiet=True,
+        )
+        print("  Starting BMv2...")
+        switch.execute(
+            "sudo systemctl stop bmv2 2>/dev/null; "
+            "sudo systemctl reset-failed bmv2 2>/dev/null; "
+            "sudo pkill -f simple_switch 2>/dev/null; sleep 2",
+            quiet=True,
+        )
+        ss_path_out, _ = switch.execute(
+            "which simple_switch 2>/dev/null || "
+            "find /usr/local/bin /usr/bin -name simple_switch 2>/dev/null | head -1", quiet=True)
+        ss_path = ss_path_out.strip() or "/usr/local/bin/simple_switch"
+        switch.execute(
+            f"sudo systemd-run --unit=bmv2 --remain-after-exit {ss_path} "
+            f"--interface 0@{iface_alice} --interface 1@{iface_bob} "
+            f"--log-level warn {home}/qfabric/{json_rel}",
+            quiet=True,
+        )
+        time.sleep(3)
+        ps_out, _ = switch.execute("pgrep -a simple_switch", quiet=True)
+        if not ps_out.strip():
+            log_out, _ = switch.execute("sudo journalctl -u bmv2 --no-pager -n 20 2>/dev/null", quiet=True)
+            print(f"  ERROR: BMv2 failed to start!\n  Journal: {log_out.strip()}")
+            raise RuntimeError("BMv2 failed to start")
+        cli = "/usr/local/bin/simple_switch_CLI"
+
+    # ---- Configure tables (shared by both paths) ----
+    print("  Configuring tables...")
+    for cmd in (
+        f"table_add quantum_channel_params set_channel_params 0 => {threshold} 1 {sw_bob_mac_hex} {bob_mac_hex}",
+        f"table_add port_forwarding port_forward 0 => 1 {sw_bob_mac_hex} {bob_mac_hex}",
+        f"table_add port_forwarding port_forward 1 => 0 {sw_alice_mac_hex} {alice_mac_hex}",
+    ):
+        switch.execute(f'echo "{cmd}" | {cli} --thrift-port 9090', quiet=True)
 
     print("  Switch configured and running")
-
     return alice_mac, bob_mac, sw_alice_mac, sw_bob_mac, iface_alice, iface_bob
 
 

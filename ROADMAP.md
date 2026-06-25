@@ -68,7 +68,7 @@ QFabric runs **BB84 QKD over a single emulated link**, end-to-end on a real FABR
 ## Phase 5 — Packaging & Reproducibility ⬜
 
 - 🟡 Kiso experiment templates (local + FABRIC configs exist; parameterize topology).
-- ✅ Containerized BMv2 toolchain (`docker/Dockerfile.bmv2`).
+- ✅ Containerized BMv2 toolchain (`docker/Dockerfile.bmv2`, Ubuntu-based) + GHCR publish workflow; switch can pull a prebuilt image instead of building from source (`QFABRIC_BMV2_IMAGE`).
 - ⬜ One-click parameterized topology template.
 - ⬜ Artifact submission for reproducibility evaluation.
 
