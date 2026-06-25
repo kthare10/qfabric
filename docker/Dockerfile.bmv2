@@ -22,17 +22,22 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Base toolchain for cloning + building. NOTE: do NOT remove /var/lib/apt/lists
+# here — behavioral-model/install_deps.sh runs `apt-get install` and needs a
+# populated package index. (The lists are cleared in the final layer instead.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates git build-essential automake libtool pkg-config \
-        cmake bison flex python3 python3-pip \
+        cmake bison flex python3 python3-pip sudo wget \
         libgmp-dev libpcap-dev libboost-all-dev libgc-dev libssl-dev \
-        libjsoncpp-dev libtool-bin iproute2 ethtool tcpdump sudo && \
-    rm -rf /var/lib/apt/lists/*
+        libjsoncpp-dev libtool-bin iproute2 ethtool tcpdump
 
 # --- behavioral-model (BMv2: simple_switch, simple_switch_CLI) ---
+# `apt-get update` again so install_deps.sh can resolve its packages (grpc,
+# protobuf, thrift, nanomsg, xxhash, ... — all in Ubuntu 22.04 main/universe).
 WORKDIR /opt
 RUN git clone --depth 1 https://github.com/p4lang/behavioral-model.git && \
     cd behavioral-model && \
+    apt-get update && \
     ./install_deps.sh && \
     ./autogen.sh && \
     ./configure --enable-debugger && \
@@ -49,7 +54,10 @@ RUN git clone --recursive --depth 1 https://github.com/p4lang/p4c.git && \
     make -j"$(nproc)" && \
     make install && \
     ldconfig && \
-    rm -rf /opt/p4c/build/CMakeFiles
+    rm -rf /opt/p4c/build/CMakeFiles /var/lib/apt/lists/*
+
+# Fail the build early if the expected tools aren't on PATH.
+RUN simple_switch --version && p4c-bm2-ss --version
 
 WORKDIR /work
 CMD ["/bin/bash"]
