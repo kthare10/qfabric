@@ -420,7 +420,7 @@ def install_deps(slice_obj, build_bmv2=True):
     # Verify installation succeeded
     verify_out, _ = switch.execute("which simple_switch && which p4c-bm2-ss", quiet=True)
     if "simple_switch" not in verify_out or "p4c" not in verify_out:
-        print(f"  ERROR: BMv2/p4c installation failed!")
+        print("  ERROR: BMv2/p4c installation failed!")
         print(f"  Verify output: {verify_out.strip()}")
         print(f"  Last stderr: {str(stderr)[-500:]}")
         raise RuntimeError("BMv2/p4c installation failed")
@@ -621,7 +621,7 @@ def setup_dataplane_ips(slice_obj, alice_mac: str, bob_mac: str):
         )
         print(f"  Port forwarding table: {table_out.strip()}")
     else:
-        print(f"  Ping successful!")
+        print("  Ping successful!")
 
     return alice_ip, bob_ip
 
@@ -714,7 +714,7 @@ def run_bb84(slice_obj, scenario_path: str, alice_mac: str, bob_mac: str,
     # Wait for Alice thread to complete (Bob should also finish)
     print("  Waiting for BB84 to complete...")
     alice_result = alice_thread.result()
-    print(f"  Alice finished")
+    print("  Alice finished")
     print(f"  Alice output: {str(alice_result[0])[:2000]}")
     if alice_result[1]:
         print(f"  Alice stderr: {str(alice_result[1])[:300]}")
@@ -723,7 +723,7 @@ def run_bb84(slice_obj, scenario_path: str, alice_mac: str, bob_mac: str,
     time.sleep(5)
     try:
         bob_result = bob_thread.result()
-        print(f"  Bob finished")
+        print("  Bob finished")
         print(f"  Bob output: {str(bob_result[0])[:500]}")
     except Exception as e:
         print(f"  Bob thread: {e}")
@@ -836,7 +836,7 @@ def main():
 
     print("\n=== Done ===")
     print(f"Slice '{args.slice_name}' is still active.")
-    print(f"To clean up: python scripts/deploy_fabric.py --cleanup")
+    print("To clean up: python scripts/deploy_fabric.py --cleanup")
 
 
 if __name__ == "__main__":

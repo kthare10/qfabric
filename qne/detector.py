@@ -30,7 +30,7 @@ from typing import Optional
 
 import numpy as np
 
-from qne.photon import Basis, PhotonPacket
+from qne.photon import PhotonPacket
 
 
 @dataclass

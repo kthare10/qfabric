@@ -44,3 +44,8 @@ addopts = "-v --tb=short"
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.ruff.lint.per-file-ignores]
+# deploy_fabric.py intentionally sets up a flush-print wrapper and sys.path
+# before importing project modules — E402 (import-not-at-top) is expected there.
+"scripts/deploy_fabric.py" = ["E402"]

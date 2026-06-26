@@ -40,7 +40,6 @@ Usage:
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from validation.scenario import ValidationResult, ValidationScenario
@@ -148,10 +147,7 @@ def run_sequence_bb84(scenario: ValidationScenario) -> ValidationResult:
         sifted_bits = keysize * num_generated
 
         from qne.bb84 import BB84Protocol
-        if 0.0 <= qber < 0.11:
-            secure_fraction = max(0.0, 1.0 - 2.0 * BB84Protocol.binary_entropy(qber))
-        else:
-            secure_fraction = 0.0
+        secure_fraction = BB84Protocol.secure_key_fraction(qber)
 
         n = scenario.num_photons
         return ValidationResult(

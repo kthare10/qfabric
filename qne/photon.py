@@ -24,7 +24,7 @@ Photon header is 17 bytes after the 14-byte Ethernet header.
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 
 ETHERTYPE_PHOTON = 0x7101

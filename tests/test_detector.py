@@ -18,10 +18,9 @@
 """Tests for the detector model."""
 
 import numpy as np
-import pytest
 
 from qne.detector import Detector, DetectionEvent
-from qne.photon import Basis, PhotonPacket, State
+from qne.photon import PhotonPacket
 
 
 class TestDetectorEfficiency:

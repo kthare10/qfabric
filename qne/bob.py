@@ -24,17 +24,15 @@ model (efficiency, dark counts), and performs classical sifting with Alice.
 from __future__ import annotations
 
 import socket
-import time
-from typing import Optional
 
 import numpy as np
 
-from qne.bb84 import BB84Protocol, BobRecord, SiftingResult
+from qne.bb84 import BB84Protocol, BobRecord
 from qne.channel import ClassicalServer
 from qne.config import ScenarioConfig
 from qne.detector import Detector
 from qne.metrics import MetricsCollector
-from qne.photon import ETHERTYPE_PHOTON, PhotonPacket
+from qne.photon import PhotonPacket
 
 
 class Bob:
@@ -89,7 +87,7 @@ class Bob:
         # correctly (otherwise photons_sent would be 0 and loss_rate negative).
         self.collector.record_sent(self.config.protocol.num_photons)
         metrics = self.collector.finalize()
-        print(f"\n=== Bob Results ===")
+        print("\n=== Bob Results ===")
         print(f"  Photons received (raw): {len(self.detection_log)}")
         print(f"  Sifted bits:            {metrics.sifted_bits}")
         print(f"  QBER:                   {metrics.qber:.4f}")
@@ -101,8 +99,6 @@ class Bob:
 
     def _receive_photons(self) -> None:
         """Listen for photon frames and apply detector model."""
-        num_photons = self.config.protocol.num_photons
-
         sock = socket.socket(
             socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x7101)
         )
@@ -162,7 +158,6 @@ class Bob:
 
             # Find matching bases
             matching_indices = []
-            alice_bits = []
             bob_bits = []
             detected_sequences = []
 
@@ -182,28 +177,9 @@ class Bob:
                 "detected_sequences": detected_sequences,
             })
 
-            # Receive Alice's sifted bits for QBER estimation
-            # (In real QKD, only a sample is compared — here we reconstruct)
-            protocol = BB84Protocol(
-                sample_fraction=self.config.protocol.sample_fraction,
-                seed=self.config.seed + 1,
-            )
-
-            # Build Alice's bits from the basis info we have
-            # In the actual protocol, Alice sends her bit values for the
-            # sampled positions only. For emulation, we reconstruct the
-            # sifting result from both logs.
-            alice_sifted_bits = []
-            for seq in matching_indices:
-                # Alice's bit value = her state for that photon
-                # We get this indirectly: if bases match, ideal bit = bob's bit
-                # But we need Alice's actual value for QBER measurement.
-                # Alice will need to share sampled bit values.
-                pass
-
-            # For the emulation, Alice and Bob share enough info to compute QBER
-            # Bob sends his sifted bits count and waits for Alice to provide
-            # the sample comparison
+            # Bob shares his sifted count and asks Alice for the sample bits to
+            # compare. (In real QKD only a sample is revealed; here Alice sends
+            # the sampled positions for QBER estimation.)
             sifted_count = len(matching_indices)
 
             # Simplified QBER: compare Bob's bits with what Alice sent
@@ -238,13 +214,9 @@ class Bob:
                 n_sample = 0
                 errors = 0
 
-            # Compute key rate
+            # Compute key rate (shared Shor-Preskill helper)
             raw_key_rate = sifted_count / self.config.protocol.num_photons
-            if qber < 0.11:
-                h_qber = BB84Protocol.binary_entropy(qber)
-                secure_rate_per_sifted = max(0.0, 1 - 2 * h_qber)
-            else:
-                secure_rate_per_sifted = 0.0
+            secure_rate_per_sifted = BB84Protocol.secure_key_fraction(qber)
 
             remaining = sifted_count - n_sample
             final_key_bits = int(remaining * secure_rate_per_sifted)

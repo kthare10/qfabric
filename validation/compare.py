@@ -37,8 +37,6 @@ from pathlib import Path
 from typing import Optional
 
 import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
 import yaml
 
 from validation.scenario import ValidationResult, ValidationScenario
@@ -313,7 +311,7 @@ def run_all_platforms(
         print("  Using QFabric FABRIC testbed result...")
         results = [qfabric_result]
     else:
-        print(f"  Running QFabric (simulated)...")
+        print("  Running QFabric (simulated)...")
         results = [run_qfabric_bb84_simulated(scenario)]
 
     # SeQUeNCe
@@ -322,7 +320,7 @@ def run_all_platforms(
         results.append(run_backend_subprocess(
             SEQUENCE_PYTHON, "validation.run_sequence", "sequence", scenario))
     elif HAS_SEQUENCE:
-        print(f"  Running SeQUeNCe (in-process)...")
+        print("  Running SeQUeNCe (in-process)...")
         results.append(run_sequence_bb84(scenario))
 
     # NetSquid
@@ -331,7 +329,7 @@ def run_all_platforms(
         results.append(run_backend_subprocess(
             NETSQUID_PYTHON, "validation.run_netsquid", "netsquid", scenario))
     elif HAS_NETSQUID:
-        print(f"  Running NetSquid (in-process)...")
+        print("  Running NetSquid (in-process)...")
         results.append(run_netsquid_bb84(scenario))
 
     return results
@@ -455,7 +453,7 @@ def main():
         ok_results = print_backend_summary(results)
         comp = compare_results(ok_results)
 
-        print(f"\n--- Comparisons ---")
+        print("\n--- Comparisons ---")
         if not comp["comparisons"]:
             print("  (need at least 2 backends with data to cross-validate)")
         for c in comp["comparisons"]:

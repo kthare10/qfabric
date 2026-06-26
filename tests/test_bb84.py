@@ -17,8 +17,6 @@
 
 """Tests for BB84 sifting logic and key rate computation."""
 
-import numpy as np
-import pytest
 
 from qne.bb84 import AliceRecord, BB84Protocol, BobRecord, SiftingResult
 
@@ -176,3 +174,16 @@ class TestKeyRate:
         assert BB84Protocol.binary_entropy(0.0) == 0.0
         assert BB84Protocol.binary_entropy(1.0) == 0.0
         assert abs(BB84Protocol.binary_entropy(0.5) - 1.0) < 1e-10
+
+    def test_secure_key_fraction(self):
+        """Shared Shor-Preskill secure fraction (single source of truth)."""
+        skf = BB84Protocol.secure_key_fraction
+        assert skf(0.0) == 1.0                      # noiseless → full fraction
+        assert skf(0.11) == 0.0                     # at/above the security threshold
+        assert skf(0.5) == 0.0
+        assert skf(-0.1) == 0.0                     # invalid QBER → 0
+        # Monotonically decreasing on [0, 0.11)
+        assert skf(0.01) > skf(0.05) > skf(0.10) > 0.0
+        # Matches the closed form for a mid value
+        q = 0.02
+        assert abs(skf(q) - (1.0 - 2.0 * BB84Protocol.binary_entropy(q))) < 1e-12

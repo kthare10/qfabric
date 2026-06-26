@@ -25,7 +25,7 @@ Implements the classical post-processing steps of BB84:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -167,6 +167,18 @@ class BB84Protocol:
             return 0.0
         return -p * np.log2(p) - (1 - p) * np.log2(1 - p)
 
+    @staticmethod
+    def secure_key_fraction(qber: float) -> float:
+        """Asymptotic Shor-Preskill secure fraction per sifted bit: 1 - 2*H(QBER).
+
+        Returns 0 above the ~11% BB84 security threshold (or for invalid QBER).
+        Single source of truth for the secure-key-rate math used by the sim path,
+        the live Bob path, and the simulator adapters.
+        """
+        if 0.0 <= qber < 0.11:
+            return max(0.0, 1.0 - 2.0 * BB84Protocol.binary_entropy(qber))
+        return 0.0
+
     def compute_key_rate(
         self,
         sifted: SiftingResult,
@@ -184,11 +196,7 @@ class BB84Protocol:
         n_sifted = sifted.sifted_count
         n_remaining = n_sifted - qber_estimate.num_sampled
 
-        if qber >= 0.11:
-            # BB84 cannot produce secure key above ~11% QBER
-            secure_rate_per_sifted = 0.0
-        else:
-            secure_rate_per_sifted = max(0.0, 1.0 - 2 * self.binary_entropy(qber))
+        secure_rate_per_sifted = self.secure_key_fraction(qber)
 
         final_key_bits = int(n_remaining * secure_rate_per_sifted)
         raw_key_rate = n_sifted / num_photons_sent if num_photons_sent > 0 else 0.0

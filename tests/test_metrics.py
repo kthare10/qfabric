@@ -17,11 +17,9 @@
 
 """Tests for metrics collection and serialization."""
 
-import json
 import tempfile
 from pathlib import Path
 
-import pytest
 
 from qne.metrics import ExperimentMetrics, MetricsCollector
 

@@ -31,7 +31,7 @@ QFabric runs **BB84 QKD over a single emulated link**, end-to-end on a real FABR
 - ✅ Fiber loss as probabilistic drop, `P(loss) = 1 − 10^(−α·L/10)`, threshold-based.
 - ✅ Per-wavelength loss table; photon TX/drop counters.
 - ✅ Classical-traffic L2 forwarding (FABRIC OVS MAC workaround).
-- 🟡 Validate drop rate vs. analytical model across a distance sweep (framework exists; needs a recorded dataset + plot checked in).
+- ✅ Sweep figures checked in (`paper/figures/`, via `paper/make_figures.py`) — QBER + key rate vs distance/attenuation. Validate measured drop rate vs analytical once a clean FABRIC sweep dataset is recorded.
 - ⬜ **Timing jitter injection** in the data plane and validation against detector specs.
 - ⬜ **Throughput benchmark**: sustainable photon rate / P4 processing overhead.
 - ⬜ Port the model from BMv2 to **Tofino / DPDK SmartNIC** for finer timing control.
@@ -42,8 +42,8 @@ QFabric runs **BB84 QKD over a single emulated link**, end-to-end on a real FABR
 - ✅ BB84 as the first protocol; detector model (efficiency, dark counts, random-basis measurement).
 - ✅ Polarization fidelity modeled as a depolarizing misalignment in the detector (`polarization_error = 1 − F`), giving a realistic intrinsic QBER ≈ (1−F)/2. Used by both the sim path and the live Bob path.
 - 🟡 Detector realism: `dead_time` and `timing_jitter` are parsed from config but **not yet modeled**.
-- ⬜ Consolidate the duplicated QBER/key-rate logic (`BB84Protocol` vs. inline in `Bob._run_sifting`) into a single code path.
-- ⬜ Remove the vestigial empty loop in `Bob._run_sifting` (dead code from an earlier design).
+- ✅ Consolidated the secure-key-rate math into `BB84Protocol.secure_key_fraction`, used by the sim path, the live Bob path, and the simulator adapters.
+- ✅ Removed the vestigial dead code in `Alice`/`Bob._run_sifting`.
 - ⬜ Error correction (e.g., Cascade) and privacy amplification beyond the asymptotic Shor–Preskill estimate.
 - ⬜ GPU-accelerated density-matrix tracking for quantum-memory emulation (needed for entanglement-based protocols).
 
@@ -90,11 +90,11 @@ Priority order from the research plan:
 ## Engineering / Hygiene Backlog
 
 - ✅ License (Apache 2.0) + author headers across all source files.
-- ⬜ Initial git commit (repo currently has no commits).
-- ⬜ CI: run `pytest` + the simulation-mode cross-validation on every push.
-- ⬜ Lint/format gate (`ruff` is configured in `pyproject.toml`).
+- ✅ Public GitHub repo with GPG-signed history (github.com/kthare10/qfabric).
+- ✅ CI: `pytest` + ruff + simulation-mode cross-validation on every push (`.github/workflows/tests.yml`).
+- ✅ Lint/format gate (`ruff` clean; config + per-file-ignores in `pyproject.toml`).
+- ✅ Pin simulator versions + document install (SeQUeNCe pinned; NetSquid documented; per-node env scripts).
 - ⬜ Type-check pass and docstring coverage.
-- ⬜ Pin simulator versions and document install for SeQUeNCe/NetSquid.
 
 ---
 

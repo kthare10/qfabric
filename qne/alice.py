@@ -25,15 +25,14 @@ from __future__ import annotations
 
 import socket
 import time
-from typing import Optional
 
 import numpy as np
 
-from qne.bb84 import AliceRecord, BB84Protocol
+from qne.bb84 import AliceRecord
 from qne.channel import ClassicalClient
 from qne.config import ScenarioConfig
 from qne.metrics import MetricsCollector
-from qne.photon import Basis, PhotonPacket, State
+from qne.photon import PhotonPacket
 
 
 class Alice:
@@ -88,7 +87,7 @@ class Alice:
         self._run_sifting()
 
         metrics = self.collector.finalize()
-        print(f"\n=== Alice Results ===")
+        print("\n=== Alice Results ===")
         print(f"  Photons sent:    {metrics.photons_sent}")
         print(f"  Sifted bits:     {metrics.sifted_bits}")
         print(f"  QBER:            {metrics.qber:.4f}")
@@ -162,17 +161,8 @@ class Alice:
             matching_seqs = msg["matching_indices"]
             bob_detected_seqs = set(msg["detected_sequences"])
 
-            # Build sifted key from matching indices
-            protocol = BB84Protocol(
-                sample_fraction=self.config.protocol.sample_fraction,
-                seed=self.config.seed + 1,
-            )
-
-            # Index sent log for fast lookup
+            # Index sent log for fast lookup (used to answer Bob's sample request).
             sent_by_seq = {rec.sequence_num: rec for rec in self.sent_log}
-
-            # Reconstruct sifted bits on Alice's side
-            alice_sifted = [sent_by_seq[seq].bit_value for seq in matching_seqs]
 
             # Bob may request Alice's sample bits for QBER computation
             sample_req = channel.recv_message()

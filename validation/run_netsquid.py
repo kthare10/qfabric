@@ -38,7 +38,6 @@ Usage:
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from validation.scenario import ValidationResult, ValidationScenario
@@ -126,10 +125,7 @@ def run_netsquid_bb84(scenario: ValidationScenario) -> ValidationResult:
         qber = errors / n_sifted if n_sifted > 0 else 0.0
 
         from qne.bb84 import BB84Protocol
-        if 0.0 <= qber < 0.11:
-            secure_fraction = max(0.0, 1.0 - 2.0 * BB84Protocol.binary_entropy(qber))
-        else:
-            secure_fraction = 0.0
+        secure_fraction = BB84Protocol.secure_key_fraction(qber)
 
         return ValidationResult(
             platform="netsquid",
