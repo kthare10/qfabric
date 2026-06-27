@@ -1,25 +1,25 @@
 {
-  "scenario_name": "distance_km=100",
-  "photons_sent": 100000,
-  "photons_received": 76168,
-  "photons_lost": 23832,
+  "scenario_name": "fabric_1km",
+  "photons_sent": 10000,
+  "photons_received": 7672,
+  "photons_lost": 2328,
   "dark_counts": 0,
-  "sifted_bits": 38212,
-  "qber": 0.009159905783826224,
+  "sifted_bits": 3813,
+  "qber": 0.010498687664041995,
   "qber_confidence": [
-    0.006139155382796643,
-    0.012180656184855806
+    0.0002641252551294441,
+    0.020733250072954547
   ],
-  "raw_key_rate": 0.38212,
-  "secure_key_rate": 0.2922,
-  "final_key_bits": 29220,
-  "elapsed_seconds": 114.559401512146,
-  "start_time": "2026-06-26T14:56:43",
-  "end_time": "2026-06-26T14:58:37",
+  "raw_key_rate": 0.3813,
+  "secure_key_rate": 0.2854,
+  "final_key_bits": 2854,
+  "elapsed_seconds": 62.832725048065186,
+  "start_time": "2026-06-26T21:34:47",
+  "end_time": "2026-06-26T21:35:49",
   "config": {
-    "name": "distance_km=100",
+    "name": "fabric_1km",
     "channel": {
-      "distance_km": 100,
+      "distance_km": 1.0,
       "attenuation_db_per_km": 0.2,
       "polarization_fidelity": 0.98
     },
@@ -30,13 +30,13 @@
       "timing_jitter": 0.0
     },
     "protocol": {
-      "num_photons": 100000,
+      "num_photons": 10000,
       "send_rate_hz": 10000.0,
       "sample_fraction": 0.1,
       "wavelength": 0
     },
     "seed": 42
   },
-  "loss_rate": 0.23832,
-  "detection_rate": 0.76168
+  "loss_rate": 0.2328,
+  "detection_rate": 0.7672
 }
