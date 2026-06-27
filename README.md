@@ -39,8 +39,10 @@ Alice (Python)  →  BMv2 P4 Switch  →  Bob (Python)
 | `scripts/` | `deploy_fabric.py` (full FABRIC slice provisioning + run), `install_bmv2.sh`, `package_artifact.sh`, and the cross-validation env setup scripts |
 | `notebooks/` | Linear workflow: `00_overview` → `01_setup_slice` → `02_run_experiment` → `03_cross_validation` → `04_analysis` → `05_run_all_scenarios` → `06_network_effects` |
 | `kiso/` | Kiso experiment config for FABRIC runs |
-| `docker/` | `Dockerfile.bmv2` for a reproducible BMv2 toolchain |
-| `tests/` | Unit tests for BB84, detector, photon, metrics, and cross-validation |
+| `docker/` | `Dockerfile.bmv2` (thin layer on `p4lang/p4c`); prebuilt image published to GHCR |
+| `paper/` | `make_figures.py` + `figures/` (QBER/key-rate sweep plots) |
+| `tests/` | Unit tests for BB84, detector, photon, metrics, and cross-validation (run in CI) |
+| `.github/workflows/` | CI: `tests.yml` (ruff + pytest + sim cross-validation) and `build-bmv2.yml` (GHCR image) |
 
 ## Quick Start
 

@@ -129,7 +129,9 @@ Classical post-processing logic lives in `qne/bb84.py`; the live message exchang
 
 ### 5.1 Classical channel transport (`qne/channel.py`)
 
-Length-prefixed JSON over TCP: `[4-byte big-endian length][UTF-8 JSON]`. `ClassicalServer` (Bob) listens with IPv4/IPv6 dual-stack; `ClassicalClient` (Alice) connects with retries (default 30 attempts × 2 s) to tolerate Bob still draining photons.
+Length-prefixed JSON over TCP: `[4-byte big-endian length][UTF-8 JSON]`. `ClassicalServer` (Bob) listens with IPv4/IPv6 dual-stack; `ClassicalClient` (Alice) connects with retries (default 60 attempts × 2 s) to tolerate Bob still draining photons. Once connected, the socket uses a generous `data_timeout` (default 600 s) so large basis lists (e.g. 100k photons) transfer over the emulated path without a spurious timeout.
+
+On FABRIC the classical channel rides the **data-plane L2 link** (Bob at `10.10.1.2:5100`), not the management network — the management network blocks arbitrary cross-site TCP. Because it shares the link with photon frames but is plain IP/TCP (photons are EtherType `0x7101`), it can be impaired in isolation with `tc`/`netem` (see §10).
 
 ### 5.2 Message sequence
 
@@ -158,13 +160,11 @@ r = max(0, 1 − 2·H₂(QBER))      for QBER < 0.11
 r = 0                            for QBER ≥ 0.11   (BB84 security threshold)
 ```
 
-where `H₂` is binary entropy. Then:
+where `H₂` is binary entropy. The fraction `r` is computed by the single shared helper **`BB84Protocol.secure_key_fraction(qber)`**, used by the simulation path, the live `Bob` path, and the SeQUeNCe/NetSquid adapters (one source of truth). Then:
 
 - `raw_key_rate    = sifted_bits / num_photons_sent`
 - `final_key_bits  = floor((sifted_bits − num_sampled) · r)`
 - `secure_key_rate = final_key_bits / num_photons_sent`
-
-> **Implementation note**: full QBER/key-rate is computed in two places — `BB84Protocol` (used by simulation mode) and inline in `Bob._run_sifting` (used by the live socket path). These must be kept consistent; consolidating them is tracked in ROADMAP.
 
 ---
 
@@ -248,3 +248,14 @@ The cross-validation compares BB84 QBER and secure key rate across **four backen
 - The loss model is **memoryless and per-packet**; it captures average attenuation, not burst loss or correlated fading.
 - One **wavelength / one link** per run. Multi-hop and WDM are designed-for (header fields exist) but not implemented.
 - The P4 `random` extern and the Python `numpy` RNG are independent; reproducibility holds **within** a backend (fixed `seed`), not bit-for-bit **across** the P4 and Python paths.
+
+---
+
+## 10. Classical-Network-Effects Experiment
+
+The headline contribution: measuring how *real* classical-channel conditions affect QKD — what ideal-channel simulators cannot show. Driven by notebook `06_network_effects` over `deploy_fabric` helpers.
+
+- **Isolation.** `apply_classical_netem(slice_obj, delay_ms, jitter_ms, loss_pct, alice_delay_ms, bob_delay_ms)` installs a `prio` qdisc + `netem` band on each endpoint's data-plane interface and a `u32` filter that routes **only TCP:5100** (the sifting channel, matched on src/dst port) into the impaired band. Photon frames (EtherType `0x7101`, non-IP) fall through unaffected, so the quantum channel is untouched. `clear_classical_netem` removes it. Asymmetric per-direction latency is supported.
+- **What changes, what doesn't.** The classical channel is TCP (reliable), so latency/jitter/loss do **not** change QBER or bits-per-photon. They change **time-to-key** (`elapsed_seconds`) and effective **key bits/second** (`final_key_bits / elapsed_seconds`). QBER staying flat across conditions is the sanity check that the impairment isolated the classical path.
+- **Orchestration.** `run_network_conditions_experiment(slice_obj, scenario, conditions)` applies each condition, runs BB84, records `{qber, sifted_bits, final_key_bits, secure_key_rate, elapsed_seconds, key_bits_per_sec}`, and writes `results/network_effects.json` (resumable; netem is cleared on every iteration and at the end). Default conditions: baseline, +25 ms, +100 ms, jitter 50±20 ms, 1% loss, asymmetric 100/10 ms.
+- **Why it matters.** On an ideal classical channel (the SeQUeNCe/NetSquid assumption) key *rate* is independent of the control channel; on QFabric it degrades with real latency/jitter/loss — quantifying the simulation-vs-deployment gap.
