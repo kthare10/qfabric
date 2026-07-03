@@ -87,6 +87,12 @@ class DistributedBB84(BB84):
         self.metrics: dict = {}
         self._bob_records: dict[int, tuple[int, int]] = {}  # seq -> (basis, bit)
         self._bob_key_order: list[int] = []
+        self._bob_sifted_count = 0
+        self._bob_num_sampled = 0
+        # raw mode head race: photons (P4 path) can arrive BEFORE the TCP
+        # BEGIN_PHOTON_PULSE that resets _bob_records; buffer them here and
+        # replay after BEGIN instead of silently wiping the head of the train.
+        self._pre_begin_pulses: list = []
         self._num_pulses = 0
         self._t_start_ns = 0
 
@@ -183,6 +189,12 @@ class DistributedBB84(BB84):
         Called once (BulkStream) or many times (PerPhotonEvent); accumulates into
         _bob_records until QUBITS_DONE arrives. Reset happens on BEGIN_PHOTON_PULSE.
         """
+        if not self.working:
+            # BEGIN_PHOTON_PULSE hasn't been processed yet (raw-mode head race:
+            # the quantum path outran the TCP control path). Don't detect-and-
+            # record now — BEGIN would wipe the records; replay after BEGIN.
+            self._pre_begin_pulses.extend(pulses)
+            return
         for seq, a_basis, a_bit in pulses:
             photon = types.SimpleNamespace(basis=int(a_basis), state=int(a_bit),
                                            sequence_num=int(seq))
@@ -208,7 +220,11 @@ class DistributedBB84(BB84):
             self.key_bits = []
             self._bob_records = {}
             self.working = True
-            # Bob now accumulates photons (receive_qubits) until QUBITS_DONE
+            # Bob now accumulates photons (receive_qubits) until QUBITS_DONE.
+            # Replay any photons that beat this BEGIN over the raw path.
+            if self._pre_begin_pulses:
+                early, self._pre_begin_pulses = self._pre_begin_pulses, []
+                self.receive_qubits("", early)
 
         elif t == "QUBITS_DONE":                 # current node is Bob: train complete
             # In raw mode the photon path (P4) races this TCP marker; give stragglers
@@ -237,6 +253,10 @@ class DistributedBB84(BB84):
                 if n_sample else []
             sample_set = set(sample)
             self._bob_key_order = [s for s in matching if s not in sample_set]
+            # keep the full sifted count so Bob's result reports the same
+            # semantics as Alice's (sifted_bits = matches, key_bits = remainder)
+            self._bob_sifted_count = len(matching)
+            self._bob_num_sampled = n_sample
             self._send("SIFTED", {
                 "matching_indices": matching,
                 "sample_indices": sample,
@@ -276,7 +296,8 @@ class DistributedBB84(BB84):
             self.metrics = {
                 "qber": qber, "num_sampled": num_sampled, "num_errors": errors,
                 "qber_ci": list(qber_est.confidence_interval),
-                "sifted_bits": len(matching), "secure_fraction": secure_fraction,
+                "sifted_bits": len(matching), "key_bits": len(key_order),
+                "secure_fraction": secure_fraction,
                 "final_key_bits": final_key_bits,
                 "photon_mode": self.photon_mode, "photons_emitted": self._num_pulses,
                 "elapsed_s": elapsed_s,
@@ -298,7 +319,10 @@ class DistributedBB84(BB84):
                 self._pop(info=self.key)
                 self.final_keys.append(self.key)
                 key_int = self.key
-            self.metrics = {"qber": qber, "sifted_bits": len(self._bob_key_order)}
+            self.metrics = {"qber": qber,
+                            "sifted_bits": self._bob_sifted_count,
+                            "num_sampled": self._bob_num_sampled,
+                            "key_bits": len(self._bob_key_order)}
             self.working = False
             if self.on_key:
                 self.on_key(self.role, {"key": key_int, **self.metrics})

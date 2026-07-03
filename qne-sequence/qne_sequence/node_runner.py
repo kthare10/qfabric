@@ -55,7 +55,8 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
              photon_mode: str = "bulk", quantum_transport: str = "tcp",
              photon_iface: str | None = None, src_mac: str = "02:00:00:00:00:01",
              dst_mac: str = "02:00:00:00:00:02", wavelength: int = 0,
-             photon_drain_ms: float = 200.0, loss: str = "auto") -> dict:
+             photon_drain_ms: float = 200.0, loss: str = "auto",
+             photon_rate_hz: float = 10000.0) -> dict:
     role = _ROLES[role_name]
 
     # Photon loss policy (independent of transport):
@@ -111,7 +112,8 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         if role == 0:  # Alice transmits photons
             node.qchannels[peer] = RawQuantumChannel(
                 iface, src_mac=src_mac, dst_mac=dst_mac, wavelength=wavelength,
-                loss_probability=sw_loss, seed=seed + 2)
+                loss_probability=sw_loss, seed=seed + 2,
+                rate_hz=photon_rate_hz)
         else:          # Bob receives photons on a raw RX thread
             node.qchannels[peer] = RawQuantumChannel(iface)  # unused TX placeholder
             raw_rx = RawPhotonReceiver(iface, tl, dbb, peer, delay=channel_delay)
@@ -203,6 +205,10 @@ def main(argv=None) -> int:
     ap.add_argument("--src-mac", default="02:00:00:00:00:01")
     ap.add_argument("--dst-mac", default="02:00:00:00:00:02")
     ap.add_argument("--wavelength", type=int, default=0, help="P4 loss-table key / WDM tag")
+    ap.add_argument("--photon-rate-hz", type=float, default=10000.0,
+                    help="raw bulk TX pacing in frames/s (0 = unpaced burst; an "
+                         "unpaced 20k burst overruns BMv2/socket buffers and the "
+                         "drops masquerade as fiber loss)")
     ap.add_argument("--photon-drain-ms", type=float, default=200.0,
                     help="raw mode: wait for straggler photons after QUBITS_DONE")
     args = ap.parse_args(argv)
@@ -213,7 +219,8 @@ def main(argv=None) -> int:
                       args.fidelity, args.efficiency, args.dark_count_rate,
                       args.sample_fraction, args.num_pulses or None, args.photon_mode,
                       args.quantum_transport, args.photon_iface, args.src_mac,
-                      args.dst_mac, args.wavelength, args.photon_drain_ms, args.loss)
+                      args.dst_mac, args.wavelength, args.photon_drain_ms, args.loss,
+                      args.photon_rate_hz)
     print(json.dumps(result))
     return 0
 

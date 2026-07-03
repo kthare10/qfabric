@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import socket
 import threading
-from time import time_ns
+from time import perf_counter, sleep, time_ns
 
 import numpy
 
@@ -68,13 +68,18 @@ class RawQuantumChannel:
 
     def __init__(self, interface: str, src_mac="02:00:00:00:00:01",
                  dst_mac="02:00:00:00:00:02", wavelength: int = 0, delay: int = 0,
-                 loss_probability: float = 0.0, seed: int = 0):
+                 loss_probability: float = 0.0, seed: int = 0,
+                 rate_hz: float = 0.0):
         self.interface = interface
         self.src_mac = parse_mac(src_mac)
         self.dst_mac = parse_mac(dst_mac)
         self.wavelength = wavelength
         self.delay = delay
         self.loss_probability = loss_probability
+        # Frames-per-second cap for transmit_batch (0 = unpaced). An unpaced
+        # 20k-frame burst overruns BMv2 and Bob's socket buffer — the drops
+        # look like extra fiber loss. qne's scenarios use 10 kHz for BMv2.
+        self.rate_hz = rate_hz
         self._rng = numpy.random.default_rng(seed)
         self._sock = None
         self.tx_count = 0
@@ -97,9 +102,21 @@ class RawQuantumChannel:
 
     # interface parity with RemoteQuantumChannel (used by PhotonEmissionStrategy)
     def transmit_batch(self, src_name: str, receiver_proto: str, pulses: list) -> None:
+        # Absolute-deadline pacing (frame i leaves at t0 + i/rate) so sleep
+        # overhead doesn't accumulate into a lower effective rate.
+        interval = (1.0 / self.rate_hz) if self.rate_hz > 0 else 0.0
+        t0 = perf_counter()
+        emitted = 0
         for seq, basis, bit in pulses:
-            if not self._dropped():
-                self._send_photon(seq, basis, bit)
+            if self._dropped():
+                continue
+            if interval:
+                target = t0 + emitted * interval
+                remaining = target - perf_counter()
+                if remaining > 0:
+                    sleep(remaining)
+            self._send_photon(seq, basis, bit)
+            emitted += 1
 
     def transmit_one(self, src_name: str, receiver_proto: str,
                      seq: int, basis: int, bit: int) -> None:

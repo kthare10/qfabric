@@ -944,7 +944,7 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
                       distance_km=1.0, attenuation=0.2, sample_fraction=0.2,
                       photon_mode="bulk", photon_drain_ms=500, port=5100,
                       bob_data_ip="10.10.1.2", venv=".venv-qne",
-                      transport="raw", loss="auto"):
+                      transport="raw", loss="auto", photon_rate_hz=10000.0):
     """Run distributed-SeQUeNCe BB84 across the slice (raw 0x7101 photons via P4).
 
     Runs real SeQUeNCe QKDNode/BB84 instances (via `qne_sequence.node_runner`) on
@@ -1001,7 +1001,8 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
               f"--dark-count-rate {dark_count_rate} --distance-km {distance_km} "
               f"--attenuation {attenuation} --sample-fraction {sample_fraction} "
               f"--photon-mode {photon_mode} --quantum-transport {transport} --loss {loss} "
-              f"--photon-drain-ms {photon_drain_ms} --port {port}")
+              f"--photon-drain-ms {photon_drain_ms} --photon-rate-hz {photon_rate_hz} "
+              f"--port {port}")
     # raw sockets need root; env sets PYTHONPATH for `import qne`; cwd holds qne_sequence
     runner = (f"cd ~/qfabric/qne-sequence && sudo env PYTHONPATH=$HOME/qfabric "
               f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner")

@@ -65,3 +65,49 @@ def test_raw_transport_errors_clearly_without_af_packet():
     rx = RawPhotonReceiver("veth3", timeline=None, protocol=None, peer_name="alice")
     with pytest.raises(RuntimeError, match="AF_PACKET"):
         rx.start()
+
+
+def _make_bob(detector_seed: int = 1):
+    """Minimal Bob protocol — no sockets, no timeline thread."""
+    import types
+
+    from qne.detector import Detector
+    from qne_sequence.distributed_qkd import DistributedBB84, pair_distributed
+
+    owner = types.SimpleNamespace(
+        name="bobnode", protocols=[], components={}, cchannels={}, qchannels={},
+        timeline=types.SimpleNamespace(now=lambda: 0),
+    )
+    det = Detector(efficiency=1.0, dark_count_rate=0.0,
+                   polarization_error=0.0, seed=detector_seed)
+    proto = DistributedBB84(owner, "bob.BB84", "ls", "qsd", role=1, seed=2,
+                            detector=det)
+    pair_distributed(proto, 1, "alice.BB84", "alicenode")
+    return proto
+
+
+def test_photons_arriving_before_begin_are_buffered_not_wiped():
+    """Raw-mode head race: photons through the P4 path can beat the TCP
+    BEGIN_PHOTON_PULSE. They must survive the BEGIN reset, not be silently
+    lost (which shows up on FABRIC as phantom extra fiber loss)."""
+    import types
+
+    proto = _make_bob()
+
+    # head of the train arrives before BEGIN is processed
+    proto.receive_qubits("alice", [[0, 0, 1], [1, 1, 0]])
+    assert proto._bob_records == {}            # nothing recorded yet...
+    assert len(proto._pre_begin_pulses) == 2   # ...but nothing lost either
+
+    begin = types.SimpleNamespace(msg_type="BEGIN_PHOTON_PULSE", payload={
+        "frequency": 8e7, "light_time": 1e-3, "start_time": 0,
+        "wavelength": 0, "end_run_time": 10**18, "key_length": 128})
+    proto.received_message("alicenode", begin)
+
+    # with a perfect detector both early photons are recorded after replay
+    assert set(proto._bob_records) == {0, 1}
+    assert proto._pre_begin_pulses == []
+
+    # the rest of the train accumulates normally on top
+    proto.receive_qubits("alice", [[2, 0, 0]])
+    assert set(proto._bob_records) == {0, 1, 2}
