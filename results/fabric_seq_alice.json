@@ -1,0 +1,19 @@
+{
+  "role": 0,
+  "name": "alice",
+  "quantum_transport": "raw",
+  "key": 84017205239831923805455380483989769248353225495539125206642829398406008393841,
+  "qber": 0.006060606060606061,
+  "sifted_bits": 825,
+  "num_sampled": 165,
+  "secure_fraction": 0.8932771322037104,
+  "final_key_bits": 589,
+  "photon_mode": "bulk",
+  "photons_emitted": 20000,
+  "elapsed_s": 3.904129075,
+  "photons_per_s": 5122.78144902266,
+  "loss_probability": 0.045007413978564004,
+  "tx_frames": 4,
+  "rx_frames": 2,
+  "remote_access_errors": 0
+}

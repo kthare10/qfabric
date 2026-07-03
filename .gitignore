@@ -35,6 +35,9 @@ secrets/
 # Keep the bundled sample results so the analysis notebook runs without a slice
 !results/fabric_alice_results.json
 !results/fabric_bob_results.json
+!results/fabric_seq_alice.json
+!results/fabric_seq_bob.json
+!qne-sequence/results/sequence_scenarios.json
 *.pcap
 
 # Personal session tracking — never ship in the artifact
@@ -47,6 +50,10 @@ p4/tna/build/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
 
 # BMv2 logs
 *.log

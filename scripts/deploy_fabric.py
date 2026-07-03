@@ -47,6 +47,14 @@ sys.path.insert(0, str(PROJECT_DIR))
 from qne.config import ScenarioConfig
 
 
+def loss_probability(distance_km: float, attenuation_db_per_km: float) -> float:
+    """Fiber loss as a per-photon drop probability: P = 1 - 10^(-alpha*L/10).
+
+    Used to size the P4 loss threshold per distance and to report analytical loss.
+    """
+    return 1.0 - 10 ** (-(attenuation_db_per_km * distance_km) / 10.0)
+
+
 def get_fablib():
     """Initialize and return fablib manager."""
     from fabrictestbed_extensions.fablib.fablib import FablibManager as fablib_manager
@@ -896,6 +904,158 @@ def run_network_conditions_experiment(
 
     print(f"\nSaved -> {results_dir / 'network_effects.json'} ({len(rows)} conditions)")
     return rows
+
+
+def setup_sequence_runtime(slice_obj, venv=".venv-qne"):
+    """Build the distributed-SeQUeNCe emulator runtime on BOTH alice and bob.
+
+    `qne_sequence.node_runner` needs `sequence==1.0.0` (Python 3.12) + numpy, plus
+    qfabric's own `qne` package (reached via PYTHONPATH=~/qfabric). This installs a
+    dedicated `.venv-qne` on each endpoint and verifies the full import chain
+    (sequence + qne + qne_sequence). Idempotent. Run once per slice (after
+    upload_project so qne-sequence/ is present on the nodes).
+    """
+    print(f"\n=== Setting up SeQUeNCe-emulator runtime ({venv}) on alice + bob ===")
+    for name in ("alice", "bob"):
+        node = slice_obj.get_node(name)
+        print(f"  [{name}] python3.12 venv + sequence==1.0.0 ...")
+        node.execute(
+            "sudo apt-get update -qq && "
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common && "
+            "sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt-get update -qq && "
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3.12 python3.12-venv && "
+            f"cd ~/qfabric && (test -d {venv} || python3.12 -m venv {venv}) && "
+            f"{venv}/bin/pip install -q --upgrade pip && "
+            f"{venv}/bin/pip install -q numpy pyyaml 'sequence==1.0.0'",
+            quiet=False,
+        )
+        check, _ = node.execute(
+            f"cd ~/qfabric/qne-sequence && PYTHONPATH=$HOME/qfabric "
+            f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner --help "
+            f">/dev/null 2>&1 && echo 'import chain OK' || echo 'IMPORT FAILED'",
+            quiet=True,
+        )
+        print(f"    {name}: {check.strip()}")
+    print("  SeQUeNCe-emulator runtime ready on alice + bob")
+
+
+def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
+                      fidelity=0.95, efficiency=0.8, dark_count_rate=10.0,
+                      distance_km=1.0, attenuation=0.2, sample_fraction=0.2,
+                      photon_mode="bulk", photon_drain_ms=500, port=5100,
+                      bob_data_ip="10.10.1.2", venv=".venv-qne",
+                      transport="raw", loss="auto"):
+    """Run distributed-SeQUeNCe BB84 across the slice (raw 0x7101 photons via P4).
+
+    Runs real SeQUeNCe QKDNode/BB84 instances (via `qne_sequence.node_runner`) on
+    alice and bob: Bob listens (TCP classical + raw photon RX), Alice connects and
+    emits 0x7101 photon frames that traverse the BMv2 P4 switch (which applies the
+    fiber-loss drop set by `configure_switch`). Classical sifting/QBER-disclosure
+    rides TCP over the data plane — the real-WAN lever.
+
+    Loss is the switch's job; pass matching distance/attenuation only so the
+    *reported* analytical loss lines up. Returns (alice_result, bob_result) dicts.
+
+    Prereqs (notebook 01 + this notebook's earlier cells): slice up, BMv2 running
+    with the loss table set, data-plane IPs/ARP/promisc configured, and
+    setup_sequence_runtime() done.
+    """
+    import json as _json
+
+    alice = slice_obj.get_node("alice")
+    bob = slice_obj.get_node("bob")
+
+    # Photon-plane args differ by transport:
+    #   raw   -> real 0x7101 frames on the data-plane ifaces (loss=switch needs BMv2,
+    #            loss=model needs no switch); set MACs for FABRIC OVS delivery.
+    #   tcp   -> photon descriptors over the same TCP link as the classical channel;
+    #            NO switch, NO raw socket, NO root, NO photon ifaces/MACs.
+    alice_photon_args = bob_photon_args = ""
+    if transport == "raw":
+        alice_iface = alice.get_interface(network_name="net_alice_switch").get_device_name()
+        bob_iface = bob.get_interface(network_name="net_switch_bob").get_device_name()
+        alice_mac = alice.get_interface(network_name="net_alice_switch").get_mac()
+        # dst MAC: switch's Alice-side MAC (P4) so FABRIC OVS delivers; for a direct
+        # no-switch link (model/none), point dst at Bob's NIC MAC instead.
+        if loss in ("model", "none"):
+            dst_mac = bob.get_interface(network_name="net_switch_bob").get_mac()
+        else:
+            dst_mac = slice_obj.get_node("switch").get_interface(
+                network_name="net_alice_switch").get_mac()
+        alice_photon_args = (f"--photon-iface {alice_iface} --src-mac {alice_mac} "
+                             f"--dst-mac {dst_mac}")
+        bob_photon_args = f"--photon-iface {bob_iface}"
+        print(f"\n=== Running distributed-SeQUeNCe BB84 (raw 0x7101, loss={loss}) ===")
+        print(f"  Alice iface {alice_iface} src {alice_mac} -> dst {dst_mac}")
+    else:
+        print("\n=== Running distributed-SeQUeNCe BB84 (tcp descriptors, no switch) ===")
+    print(f"  Bob classical+photon TCP {bob_data_ip}:{port} | pulses={num_pulses} "
+          f"key_length={key_length} mode={photon_mode} F={fidelity} eff={efficiency}")
+
+    for node in (alice, bob):
+        node.execute("sudo pkill -f qne_sequence.node_runner 2>/dev/null; "
+                     "sudo rm -f /tmp/seq_*.log; sleep 1", quiet=True)
+
+    common = (f"--num-pulses {num_pulses} --key-length {key_length} "
+              f"--fidelity {fidelity} --efficiency {efficiency} "
+              f"--dark-count-rate {dark_count_rate} --distance-km {distance_km} "
+              f"--attenuation {attenuation} --sample-fraction {sample_fraction} "
+              f"--photon-mode {photon_mode} --quantum-transport {transport} --loss {loss} "
+              f"--photon-drain-ms {photon_drain_ms} --port {port}")
+    # raw sockets need root; env sets PYTHONPATH for `import qne`; cwd holds qne_sequence
+    runner = (f"cd ~/qfabric/qne-sequence && sudo env PYTHONPATH=$HOME/qfabric "
+              f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner")
+
+    print("  Starting Bob...")
+    bob_thread = bob.execute_thread(
+        f"{runner} --role bob --name bob --peer alice --host 0.0.0.0 "
+        f"{bob_photon_args} {common} 2>&1 | tee /tmp/seq_bob.log")
+    time.sleep(10)  # let Bob open the TCP listener (+ raw RX socket in raw mode)
+
+    print("  Starting Alice (sender)...")
+    alice_thread = alice.execute_thread(
+        f"{runner} --role alice --name alice --peer bob --host {bob_data_ip} "
+        f"{alice_photon_args} {common} 2>&1 | tee /tmp/seq_alice.log")
+
+    print("  Waiting for Alice...")
+    a_out = alice_thread.result()
+    time.sleep(5)
+    try:
+        b_out = bob_thread.result()
+    except Exception as e:
+        b_out = ("", str(e))
+
+    def _parse(out):
+        for line in reversed(str(out[0]).splitlines()):
+            line = line.strip()
+            if line.startswith("{") and '"role"' in line:
+                try:
+                    return _json.loads(line)
+                except _json.JSONDecodeError:
+                    pass
+        return None
+
+    a_res, b_res = _parse(a_out), _parse(b_out)
+
+    results_dir = PROJECT_DIR / "results"
+    results_dir.mkdir(exist_ok=True)
+    if a_res:
+        (results_dir / "fabric_seq_alice.json").write_text(_json.dumps(a_res, indent=2))
+    if b_res:
+        (results_dir / "fabric_seq_bob.json").write_text(_json.dumps(b_res, indent=2))
+
+    print("\n=== Distributed-SeQUeNCe BB84 Results ===")
+    for who, r in (("alice", a_res), ("bob", b_res)):
+        if r:
+            print(f"  [{who}] transport={r.get('quantum_transport')} "
+                  f"qber={r.get('qber')} sifted={r.get('sifted_bits')} "
+                  f"final_key_bits={r.get('final_key_bits')} "
+                  f"secure_fraction={r.get('secure_fraction')} "
+                  f"key={'yes' if r.get('key') is not None else 'no'} "
+                  f"remote_access_errors={r.get('remote_access_errors')}")
+        else:
+            print(f"  [{who}] no JSON result — check /tmp/seq_{who}.log on the node")
+    return a_res, b_res
 
 
 def cleanup(fablib, slice_name: str):

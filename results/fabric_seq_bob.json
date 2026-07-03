@@ -1,0 +1,19 @@
+{
+  "role": 1,
+  "name": "bob",
+  "quantum_transport": "raw",
+  "key": 84073744345904832104014305968340469751726571756456357073212524423352043950193,
+  "qber": 0.006060606060606061,
+  "sifted_bits": 660,
+  "num_sampled": null,
+  "secure_fraction": null,
+  "final_key_bits": null,
+  "photon_mode": "bulk",
+  "photons_emitted": null,
+  "elapsed_s": null,
+  "photons_per_s": null,
+  "loss_probability": 0.045007413978564004,
+  "tx_frames": 2,
+  "rx_frames": 4,
+  "remote_access_errors": 0
+}
