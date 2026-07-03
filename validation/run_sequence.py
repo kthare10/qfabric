@@ -100,6 +100,10 @@ def run_sequence_bb84(scenario: ValidationScenario) -> ValidationResult:
         bob = QKDNode("bob", tl, stack_size=1)
         alice.set_seed(scenario.seed)
         bob.set_seed(scenario.seed + 1)
+        # sequence's BB84 draws basis/bit lists from the numpy GLOBAL rng
+        # (BB84.py: numpy.random.choice), which node set_seed does not touch —
+        # seed it too, or every run produces a different QBER.
+        np.random.seed(scenario.seed)
         pair_bb84_protocols(alice.protocol_stack[0], bob.protocol_stack[0])
 
         # polarization_fidelity F drives the intrinsic QBER (~(1-F)/2), matching
@@ -112,6 +116,13 @@ def run_sequence_bb84(scenario: ValidationScenario) -> ValidationResult:
                              attenuation=attenuation_db_m)
         qc0.set_ends(alice, bob.name)
         qc1.set_ends(bob, alice.name)
+        # Channel polarization-noise draws go through Entity.get_generator(),
+        # which falls back to a fresh UNSEEDED default_rng (sequence
+        # kernel/entity.py) — node set_seed never reaches it. Give the channels
+        # a seeded generator so the run is actually reproducible.
+        chan_rng = np.random.default_rng(scenario.seed + 2)
+        qc0.get_generator = lambda: chan_rng
+        qc1.get_generator = lambda: chan_rng
         cc0 = ClassicalChannel("cc0", tl, distance=distance_m)
         cc1 = ClassicalChannel("cc1", tl, distance=distance_m)
         cc0.set_ends(alice, bob.name)

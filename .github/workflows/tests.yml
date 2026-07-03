@@ -63,8 +63,12 @@ jobs:
 
       # Cross-validation with SeQUeNCe actually installed: with two live
       # backends this must produce real comparisons, so run it --strict
-      # (INCONCLUSIVE or any FAIL exits nonzero).
+      # (INCONCLUSIVE or any FAIL exits nonzero). PYTHONHASHSEED pinned:
+      # sequence's event ordering is hash-iteration sensitive, and a seeded
+      # run must be deterministic for a pass/fail gate to be meaningful.
       - name: Cross-validation (qfabric vs sequence, strict)
+        env:
+          PYTHONHASHSEED: "0"
         run: python -m validation.compare validation/scenarios/baseline_1km.yml --strict
 
   # The P4 program must at least compile; catches syntax/arch errors before a

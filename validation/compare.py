@@ -83,6 +83,9 @@ def run_backend_subprocess(
         tmp.close()
         env = dict(os.environ)
         env["PYTHONPATH"] = str(PROJECT_DIR) + os.pathsep + env.get("PYTHONPATH", "")
+        # SeQUeNCe's event ordering is sensitive to hash-randomized iteration;
+        # pin the hash seed so a seeded backend run is actually reproducible.
+        env.setdefault("PYTHONHASHSEED", "0")
         proc = subprocess.run(
             [python_exe, "-m", module, tmp.name, "--json", "-"],
             cwd=str(PROJECT_DIR), env=env, capture_output=True, text=True, timeout=timeout,
