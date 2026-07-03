@@ -122,42 +122,65 @@ class BB84Protocol:
             matching_indices=matching_indices,
         )
 
+    @staticmethod
+    def sample_size(n_sifted: int, sample_fraction: float) -> int:
+        """Number of sifted bits to disclose for QBER estimation (min 1 if any)."""
+        if n_sifted <= 0:
+            return 0
+        return min(n_sifted, max(1, int(n_sifted * sample_fraction)))
+
+    @staticmethod
+    def wilson_interval(qber: float, n: int, z: float = 1.96) -> tuple[float, float]:
+        """Wilson score confidence interval for a binomial proportion.
+
+        Unlike the normal approximation, this stays informative at qber=0 or 1.
+        """
+        if n <= 0:
+            return (0.0, 0.0)
+        denominator = 1 + z**2 / n
+        center = (qber + z**2 / (2 * n)) / denominator
+        spread = z * np.sqrt(
+            (qber * (1 - qber) + z**2 / (4 * n)) / n
+        ) / denominator
+        return (max(0.0, center - spread), min(1.0, center + spread))
+
+    @staticmethod
+    def qber_from_disclosed(
+        alice_bits: list[int], bob_bits: list[int]
+    ) -> QBEREstimate:
+        """QBER from an already-chosen disclosed sample (aligned bit lists).
+
+        Used by the live/distributed paths where one side picks the sample and
+        the other side compares — the sampling and the comparison happen on
+        different nodes, but the math must be this one.
+        """
+        num = min(len(alice_bits), len(bob_bits))
+        errors = sum(
+            1 for a, b in zip(alice_bits, bob_bits) if int(a) != int(b)
+        )
+        qber = errors / num if num > 0 else 0.0
+        return QBEREstimate(
+            qber=qber,
+            num_sampled=num,
+            num_errors=errors,
+            confidence_interval=BB84Protocol.wilson_interval(qber, num),
+        )
+
     def estimate_qber(self, sifted: SiftingResult) -> QBEREstimate:
         """Estimate QBER by sampling a fraction of sifted bits.
 
-        The sampled bits are consumed (removed from the key material).
+        The sampled positions are counted here and excluded from the key
+        material by compute_key_rate (which subtracts num_sampled).
         """
         n = sifted.sifted_count
-        if n == 0:
+        num_sample = self.sample_size(n, self.sample_fraction)
+        if num_sample == 0:
             return QBEREstimate(qber=0.0, num_sampled=0, num_errors=0)
 
-        num_sample = max(1, int(n * self.sample_fraction))
         sample_indices = self.rng.choice(n, size=num_sample, replace=False)
-
-        errors = 0
-        for idx in sample_indices:
-            if sifted.alice_bits[idx] != sifted.bob_bits[idx]:
-                errors += 1
-
-        qber = errors / num_sample if num_sample > 0 else 0.0
-
-        # Wilson score confidence interval
-        if num_sample > 0:
-            z = 1.96  # 95% CI
-            denominator = 1 + z**2 / num_sample
-            center = (qber + z**2 / (2 * num_sample)) / denominator
-            spread = z * np.sqrt(
-                (qber * (1 - qber) + z**2 / (4 * num_sample)) / num_sample
-            ) / denominator
-            ci = (max(0.0, center - spread), min(1.0, center + spread))
-        else:
-            ci = (0.0, 0.0)
-
-        return QBEREstimate(
-            qber=qber,
-            num_sampled=num_sample,
-            num_errors=errors,
-            confidence_interval=ci,
+        return self.qber_from_disclosed(
+            [sifted.alice_bits[i] for i in sample_indices],
+            [sifted.bob_bits[i] for i in sample_indices],
         )
 
     @staticmethod

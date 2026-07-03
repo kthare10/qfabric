@@ -231,8 +231,8 @@ class DistributedBB84(BB84):
                 if seq < len(alice_bases) and bb == alice_bases[seq]
             )
             # choose a random disclosure sample for QBER estimation
-            n = len(matching)
-            n_sample = max(1, int(n * self.sample_fraction)) if n > 0 else 0
+            # (sampling policy shared with qne.bb84.BB84Protocol)
+            n_sample = BB84Protocol.sample_size(len(matching), self.sample_fraction)
             sample = sorted(self.rng.choice(matching, size=n_sample, replace=False).tolist()) \
                 if n_sample else []
             sample_set = set(sample)
@@ -249,11 +249,15 @@ class DistributedBB84(BB84):
             bob_sample_bits = msg.payload["bob_sample_bits"]
             alice_bits = self.bit_lists[0]
 
-            # QBER from the disclosed sample (replaces self.key ^ self.another.key)
-            errors = sum(1 for s, bbit in zip(sample, bob_sample_bits)
-                         if int(alice_bits[s]) != int(bbit))
-            num_sampled = len(sample)
-            qber = errors / num_sampled if num_sampled else 0.0
+            # QBER from the disclosed sample (replaces self.key ^ self.another.key);
+            # error counting + Wilson CI shared with qne.bb84.BB84Protocol
+            qber_est = BB84Protocol.qber_from_disclosed(
+                [int(alice_bits[s]) for s in sample],
+                [int(b) for b in bob_sample_bits],
+            )
+            qber = qber_est.qber
+            errors = qber_est.num_errors
+            num_sampled = qber_est.num_sampled
 
             sample_set = set(sample)
             key_order = [s for s in matching if s not in sample_set]
@@ -271,6 +275,7 @@ class DistributedBB84(BB84):
             elapsed_s = (time_ns() - self._t_start_ns) / 1e9
             self.metrics = {
                 "qber": qber, "num_sampled": num_sampled, "num_errors": errors,
+                "qber_ci": list(qber_est.confidence_interval),
                 "sifted_bits": len(matching), "secure_fraction": secure_fraction,
                 "final_key_bits": final_key_bits,
                 "photon_mode": self.photon_mode, "photons_emitted": self._num_pulses,

@@ -187,3 +187,59 @@ class TestKeyRate:
         # Matches the closed form for a mid value
         q = 0.02
         assert abs(skf(q) - (1.0 - 2.0 * BB84Protocol.binary_entropy(q))) < 1e-12
+
+
+class TestSharedHelpers:
+    """The statics shared by the sim, live-Bob, and distributed-SeQUeNCe paths."""
+
+    def test_sample_size(self):
+        assert BB84Protocol.sample_size(0, 0.1) == 0
+        assert BB84Protocol.sample_size(5, 0.1) == 1       # min 1 if anything sifted
+        assert BB84Protocol.sample_size(100, 0.1) == 10
+        assert BB84Protocol.sample_size(3, 1.0) == 3       # capped at n
+        assert BB84Protocol.sample_size(3, 5.0) == 3
+
+    def test_wilson_interval_informative_at_zero(self):
+        """Unlike the normal approximation, the CI is not [0,0] at qber=0."""
+        lo, hi = BB84Protocol.wilson_interval(0.0, 5)
+        assert lo == 0.0 and hi > 0.0
+        # More samples → tighter interval
+        _, hi_big = BB84Protocol.wilson_interval(0.0, 500)
+        assert hi_big < hi
+        assert BB84Protocol.wilson_interval(0.5, 0) == (0.0, 0.0)
+
+    def test_wilson_interval_brackets_estimate(self):
+        lo, hi = BB84Protocol.wilson_interval(0.1, 100)
+        assert 0.0 <= lo < 0.1 < hi <= 1.0
+
+    def test_qber_from_disclosed(self):
+        est = BB84Protocol.qber_from_disclosed([0, 1, 0, 1], [0, 1, 1, 1])
+        assert est.num_sampled == 4
+        assert est.num_errors == 1
+        assert abs(est.qber - 0.25) < 1e-12
+        lo, hi = est.confidence_interval
+        assert lo < 0.25 < hi
+
+    def test_qber_from_disclosed_empty(self):
+        est = BB84Protocol.qber_from_disclosed([], [])
+        assert est.qber == 0.0 and est.num_sampled == 0
+        assert est.confidence_interval == (0.0, 0.0)
+
+    def test_estimate_qber_uses_shared_math(self):
+        """estimate_qber == qber_from_disclosed over the same sampled positions."""
+        import numpy as np
+        rng = np.random.default_rng(7)
+        n = 200
+        alice = list(rng.integers(0, 2, n))
+        bob = [b if rng.random() > 0.05 else 1 - b for b in alice]
+        protocol = BB84Protocol(sample_fraction=0.2, seed=42)
+        sifted = SiftingResult(alice_bits=alice, bob_bits=bob,
+                               matching_indices=list(range(n)))
+        est = protocol.estimate_qber(sifted)
+        # Reproduce the sample with the same seed and compare via the static
+        sample = np.random.default_rng(42).choice(n, size=40, replace=False)
+        ref = BB84Protocol.qber_from_disclosed(
+            [alice[i] for i in sample], [bob[i] for i in sample])
+        assert est.qber == ref.qber
+        assert est.num_errors == ref.num_errors
+        assert est.confidence_interval == ref.confidence_interval

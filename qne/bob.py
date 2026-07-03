@@ -25,9 +25,7 @@ from __future__ import annotations
 
 import socket
 
-import numpy as np
-
-from qne.bb84 import BB84Protocol, BobRecord
+from qne.bb84 import BB84Protocol, BobRecord, SiftingResult
 from qne.channel import ClassicalServer
 from qne.config import ScenarioConfig
 from qne.detector import Detector
@@ -150,24 +148,35 @@ class Bob:
         channel = server.accept()
         print("Bob: Alice connected")
 
+        # All sifting/QBER/key-rate math lives in BB84Protocol — the same code
+        # tests/test_bb84.py exercises. Bob only moves messages and builds the
+        # aligned bit lists.
+        protocol = BB84Protocol(
+            sample_fraction=self.config.protocol.sample_fraction,
+            seed=self.config.seed + 1,
+        )
+
         try:
             # Receive Alice's basis list
             msg = channel.recv_message()
             assert msg["type"] == "alice_bases"
             alice_bases = {int(k): v for k, v in msg["bases"].items()}
 
-            # Find matching bases
+            # Find matching bases. Dedup by sequence number — switch flooding
+            # or loops can deliver the same photon frame twice.
             matching_indices = []
             bob_bits = []
             detected_sequences = []
+            seen: set[int] = set()
 
             for bob_rec in self.detection_log:
+                if bob_rec.sequence_num in seen:
+                    continue
+                seen.add(bob_rec.sequence_num)
                 detected_sequences.append(bob_rec.sequence_num)
                 alice_basis = alice_bases.get(bob_rec.sequence_num)
                 if alice_basis is not None and alice_basis == bob_rec.basis:
                     matching_indices.append(bob_rec.sequence_num)
-                    # We need Alice's bit value — but we can infer it during
-                    # QBER estimation. For now, just track indices.
                     bob_bits.append(bob_rec.bit_value)
 
             # Send sifting result to Alice
@@ -177,14 +186,9 @@ class Bob:
                 "detected_sequences": detected_sequences,
             })
 
-            # Bob shares his sifted count and asks Alice for the sample bits to
-            # compare. (In real QKD only a sample is revealed; here Alice sends
-            # the sampled positions for QBER estimation.)
-            sifted_count = len(matching_indices)
-
-            # Simplified QBER: compare Bob's bits with what Alice sent
-            # In the real protocol, this is done via additional message exchange.
-            # Here, we ask Alice's bits by index.
+            # Ask Alice for her bits at the matched positions. (In real QKD only
+            # a sample is revealed; here Alice sends all matched bits and the
+            # protocol samples locally for QBER estimation.)
             channel.send_message({
                 "type": "request_sample",
                 "matching_indices": matching_indices,
@@ -192,61 +196,41 @@ class Bob:
 
             sample_msg = channel.recv_message()
             if sample_msg.get("type") == "alice_sample_bits":
-                alice_sample_bits = sample_msg["bits"]
-                # Compute QBER from the full sifted set (using sample fraction)
-                rng = np.random.default_rng(self.config.seed + 1)
-                n_total = len(alice_sample_bits)
-                n_sample = max(1, int(n_total * self.config.protocol.sample_fraction))
-                if n_total == 0:
-                    n_sample = 0
-                    indices = []
-                else:
-                    n_sample = min(n_sample, n_total)
-                    indices = rng.choice(n_total, size=n_sample, replace=False)
-
-                errors = sum(
-                    1 for i in indices
-                    if alice_sample_bits[i] != bob_bits[i]
-                )
-                qber = errors / n_sample if n_sample > 0 else 0.0
+                alice_bits = list(sample_msg["bits"])
             else:
-                qber = 0.0
-                n_sample = 0
-                errors = 0
+                alice_bits = []  # protocol violation -> no verified key material
 
-            # Compute key rate (shared Shor-Preskill helper)
-            raw_key_rate = sifted_count / self.config.protocol.num_photons
-            secure_rate_per_sifted = BB84Protocol.secure_key_fraction(qber)
-
-            remaining = sifted_count - n_sample
-            final_key_bits = int(remaining * secure_rate_per_sifted)
-            secure_key_rate = final_key_bits / self.config.protocol.num_photons
+            sifted = SiftingResult(
+                alice_bits=alice_bits,
+                bob_bits=bob_bits[: len(alice_bits)],
+                matching_indices=matching_indices[: len(alice_bits)],
+            )
+            qber_est = protocol.estimate_qber(sifted)
+            key_rate = protocol.compute_key_rate(
+                sifted, qber_est, self.config.protocol.num_photons
+            )
 
             # Send QBER result back to Alice
-            ci_half = 1.96 * np.sqrt(qber * (1 - qber) / max(n_sample, 1))
             channel.send_message({
                 "type": "qber_result",
-                "qber": qber,
-                "num_sampled": n_sample,
-                "num_errors": errors,
-                "confidence_interval": [
-                    max(0.0, qber - ci_half),
-                    min(1.0, qber + ci_half),
-                ],
-                "raw_key_rate": raw_key_rate,
-                "secure_key_rate": secure_key_rate,
-                "final_key_bits": final_key_bits,
+                "qber": qber_est.qber,
+                "num_sampled": qber_est.num_sampled,
+                "num_errors": qber_est.num_errors,
+                "confidence_interval": list(qber_est.confidence_interval),
+                "raw_key_rate": key_rate.raw_key_rate,
+                "secure_key_rate": key_rate.secure_key_rate,
+                "final_key_bits": key_rate.final_key_bits,
             })
 
             self.collector.set_sifting_results(
-                sifted_bits=sifted_count,
-                qber=qber,
-                confidence=(max(0.0, qber - ci_half), min(1.0, qber + ci_half)),
+                sifted_bits=sifted.sifted_count,
+                qber=qber_est.qber,
+                confidence=qber_est.confidence_interval,
             )
             self.collector.set_key_rate(
-                raw_rate=raw_key_rate,
-                secure_rate=secure_key_rate,
-                final_bits=final_key_bits,
+                raw_rate=key_rate.raw_key_rate,
+                secure_rate=key_rate.secure_key_rate,
+                final_bits=key_rate.final_key_bits,
             )
 
         finally:
