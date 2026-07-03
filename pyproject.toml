@@ -49,3 +49,5 @@ target-version = "py310"
 # deploy_fabric.py intentionally sets up a flush-print wrapper and sys.path
 # before importing project modules — E402 (import-not-at-top) is expected there.
 "scripts/deploy_fabric.py" = ["E402"]
+# Figure script uses compact `set_xlabel(...); set_ylabel(...)` one-liners.
+"qne-sequence/plots.py" = ["E702"]

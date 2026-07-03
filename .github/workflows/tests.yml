@@ -29,10 +29,56 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Ruff (lint)
-        run: ruff check qne validation scripts tests
+        run: ruff check qne validation scripts tests qne-sequence p4/tests
 
       - name: Pytest
         run: pytest tests/ -q
 
       - name: Cross-validation smoke (QFabric simulation)
         run: python -m validation.compare validation/scenarios/baseline_1km.yml
+
+  # Distributed SeQUeNCe runtime (qne-sequence): needs Python 3.12 for the
+  # pinned sequence==1.0.0. Runs the two-process loopback protocol tests.
+  test-qne-sequence:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install (qfabric + sequence pin)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,sequence]"
+
+      - name: Pytest (qne-sequence)
+        working-directory: qne-sequence
+        env:
+          PYTHONPATH: .
+        run: pytest tests/ -q
+
+      # Cross-validation with SeQUeNCe actually installed: with two live
+      # backends this must produce real comparisons, so run it --strict
+      # (INCONCLUSIVE or any FAIL exits nonzero).
+      - name: Cross-validation (qfabric vs sequence, strict)
+        run: python -m validation.compare validation/scenarios/baseline_1km.yml --strict
+
+  # The P4 program must at least compile; catches syntax/arch errors before a
+  # FABRIC deploy. Uses the same p4c-bm2-ss the deploy path uses.
+  p4-compile:
+    runs-on: ubuntu-latest
+    container: p4lang/p4c:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compile quantum_channel.p4 (p4c-bm2-ss)
+        run: |
+          p4c-bm2-ss --version
+          p4c-bm2-ss --std p4-16 -I p4/bmv2/includes \
+            -o /tmp/quantum_channel.json p4/bmv2/quantum_channel.p4
+          test -s /tmp/quantum_channel.json

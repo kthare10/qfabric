@@ -27,7 +27,6 @@ Usage: sudo ptf --test-dir p4/tests --pypath . --interface 0@veth1 --interface 1
 import math
 import struct
 
-import ptf
 import ptf.testutils as testutils
 from ptf.base_tests import BaseTest
 
@@ -104,7 +103,7 @@ class QuantumChannelLossTest(BaseTest):
         lower_bound = expected_drops - self.SIGMA_TOLERANCE * sigma
         upper_bound = expected_drops + self.SIGMA_TOLERANCE * sigma
 
-        print(f"\n=== Quantum Channel Loss Test Results ===")
+        print("\n=== Quantum Channel Loss Test Results ===")
         print(f"  Packets sent:     {self.NUM_PACKETS}")
         print(f"  Packets received: {received}")
         print(f"  Packets dropped:  {dropped}")

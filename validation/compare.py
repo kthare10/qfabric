@@ -409,7 +409,10 @@ def plot_sweep_comparison(
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python -m validation.compare <scenario_or_sweep.yml> [--plot output.png]")
+        print(
+            "Usage: python -m validation.compare <scenario_or_sweep.yml>"
+            " [--plot output.png] [--strict]"
+        )
         sys.exit(1)
 
     path = Path(sys.argv[1])
@@ -418,6 +421,11 @@ def main():
         plot_idx = sys.argv.index("--plot")
         if plot_idx + 1 < len(sys.argv):
             plot_output = sys.argv[plot_idx + 1]
+    # --strict: INCONCLUSIVE (zero backend pairs compared) is also a failure,
+    # for environments where cross-validation is expected to actually run.
+    strict = "--strict" in sys.argv
+    any_failed = False
+    total_comparisons = 0
 
     if "sweep" in path.stem:
         scenarios = ValidationScenario.load_sweep(path)
@@ -432,6 +440,9 @@ def main():
             comp = compare_results(ok_results)
             if not comp["comparisons"]:
                 print("  (no backend pair to compare)")
+            total_comparisons += len(comp["comparisons"])
+            if not comp["all_passed"]:
+                any_failed = True
             for c in comp["comparisons"]:
                 status = "PASS" if c["passed"] else "FAIL"
                 print(
@@ -456,6 +467,9 @@ def main():
         print("\n--- Comparisons ---")
         if not comp["comparisons"]:
             print("  (need at least 2 backends with data to cross-validate)")
+        total_comparisons += len(comp["comparisons"])
+        if not comp["all_passed"]:
+            any_failed = True
         for c in comp["comparisons"]:
             status = "PASS" if c["passed"] else "FAIL"
             print(
@@ -468,6 +482,12 @@ def main():
         else:
             all_pass = comp["all_passed"]
             print(f"\nOverall: {'ALL PASSED' if all_pass else 'SOME FAILED'}")
+
+    if any_failed:
+        sys.exit(1)
+    if strict and total_comparisons == 0:
+        print("--strict: INCONCLUSIVE treated as failure")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
