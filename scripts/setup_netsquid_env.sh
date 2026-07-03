@@ -46,10 +46,15 @@ echo "=== Creating NetSquid env at ${VENV} (using ${PY311}) ==="
 "${VENV}/bin/pip" install --quiet --upgrade pip
 "${VENV}/bin/pip" install --quiet numpy pyyaml
 
-if [ -n "${NETSQUID_USER:-}" ] && [ -n "${NETSQUID_PASS:-}" ]; then
+if [ -n "${NETSQUID_USER:-}" ] && [ -n "${NETSQUID_PASS:-}" ] \
+   && [ "${NETSQUID_USER}" != "..." ] && [ "${NETSQUID_PASS}" != "..." ]; then
     echo "Installing NetSquid from its private index..."
+    # Percent-encode: a password with @ : / # (URL) or $ ` ' ! (shell) chars
+    # otherwise corrupts the index URL and yields a 401. pip decodes it back.
+    ENC_USER="$("${VENV}/bin/python" -c 'import os,urllib.parse as u;print(u.quote(os.environ["NETSQUID_USER"],safe=""))')"
+    ENC_PASS="$("${VENV}/bin/python" -c 'import os,urllib.parse as u;print(u.quote(os.environ["NETSQUID_PASS"],safe=""))')"
     "${VENV}/bin/pip" install \
-        --extra-index-url "https://${NETSQUID_USER}:${NETSQUID_PASS}@pypi.netsquid.org" \
+        --extra-index-url "https://${ENC_USER}:${ENC_PASS}@pypi.netsquid.org" \
         netsquid
     echo "=== Done. NetSquid $(${VENV}/bin/python -c 'import netsquid; print(netsquid.__version__)') installed ==="
 else

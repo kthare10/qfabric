@@ -206,10 +206,20 @@ def setup_sim_envs(slice_obj, netsquid_user=None, netsquid_pass=None):
 
     print("  [bob] NetSquid (.venv-nsq)...")
     creds = ""
-    if netsquid_user and netsquid_pass:
-        creds = f"--extra-index-url 'https://{netsquid_user}:{netsquid_pass}@pypi.netsquid.org'"
+    if netsquid_user in (None, "", "...") or netsquid_pass in (None, "", "..."):
+        print("    WARNING: NETSQUID_USER/NETSQUID_PASS not set (or left as the "
+              "'...' placeholder) — NetSquid will not install. Set real "
+              "credentials in the environment and re-run.")
     else:
-        print("    WARNING: NETSQUID_USER/NETSQUID_PASS not set — NetSquid will not install.")
+        # Percent-encode: the password may contain characters that break either
+        # the URL netloc (@ : / #) or the remote shell ($ ` ' ! space). Encoding
+        # both to %XX makes the token safe in the command AND correct as URL
+        # userinfo (pip decodes it back before authenticating).
+        from urllib.parse import quote
+        enc_user = quote(netsquid_user, safe="")
+        enc_pass = quote(netsquid_pass, safe="")
+        creds = (f"--extra-index-url "
+                 f"'https://{enc_user}:{enc_pass}@pypi.netsquid.org'")
     bob.execute(
         "sudo apt-get update -qq && "
         "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv python3-pip && "
