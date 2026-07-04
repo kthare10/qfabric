@@ -171,6 +171,11 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Run one distributed SeQUeNCe QKD node.")
     ap.add_argument("--role", required=True, choices=list(_ROLES))
+    ap.add_argument("--protocol", choices=["bb84", "e91", "bbm92"], default="bb84",
+                    help="bb84=prepare-and-measure; e91/bbm92=entanglement-based "
+                         "(shared quantum-state service; alice hosts the register)")
+    ap.add_argument("--num-pairs", type=int, default=20000,
+                    help="entanglement protocols: Bell pairs to generate")
     ap.add_argument("--name", required=True)
     ap.add_argument("--peer", required=True)
     ap.add_argument("--host", default="127.0.0.1")
@@ -213,6 +218,18 @@ def main(argv=None) -> int:
     ap.add_argument("--photon-drain-ms", type=float, default=200.0,
                     help="raw mode: wait for straggler photons after QUBITS_DONE")
     args = ap.parse_args(argv)
+
+    if args.protocol in ("e91", "bbm92"):
+        from .distributed_e91 import run_e91_node
+        loss_p = (0.0 if args.loss == "none"
+                  else loss_probability(args.distance_km, args.attenuation))
+        result = run_e91_node(
+            _ROLES[args.role], args.name, args.peer, args.host, args.port,
+            num_pairs=args.num_pairs, fidelity=args.fidelity,
+            loss_probability=loss_p, mode=args.protocol,
+            sample_fraction=args.sample_fraction, seed=args.seed)
+        print(json.dumps(result))
+        return 0
 
     result = run_node(args.role, args.name, args.peer, args.host, args.port,
                       args.key_length, args.key_num, args.seed, args.time_scale,

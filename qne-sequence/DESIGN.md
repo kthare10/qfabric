@@ -330,10 +330,15 @@ both driven by *distribution* being the actual requirement:
   `fidelity` scenario knob identical to the BB84 path, so cross-comparison is direct.
 
 E91/BBM92 protocol logic (`e91.py`) is transport-independent: it drives a session
-against a *service object*, so the identical protocol runs in-process (validated,
-`tests/test_e91.py`) and — next — against a `RemoteQuantumManager` proxy over the
-Link. Sifting/QBER reuse `qne.bb84.BB84Protocol`; the CHSH quartet gives the Bell
-test. Modes: `bbm92` (Z/X, key-efficient) and `e91` (adds the CHSH certification).
+against a *service object*, so the identical logic runs in-process (validated,
+`tests/test_e91.py`) and distributed over the Link (`distributed_e91.py` +
+`remote_qm.py`, `tests/test_two_node_e91.py`). In the distributed run Alice hosts
+the service and answers Bob's measurement RPCs (MEASURE_REQ/RESP); basis
+announcement, the QBER sample, and CHSH bits are the only data on the wire, so the
+raw key never transits it and the classical coordination feels the real WAN.
+Sifting/QBER reuse `qne.bb84.BB84Protocol`; the CHSH quartet gives the Bell test.
+Modes: `bbm92` (Z/X, key-efficient) and `e91` (adds the CHSH certification). Run via
+`node_runner --protocol e91|bbm92`.
 
 ---
 
