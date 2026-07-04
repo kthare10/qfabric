@@ -153,6 +153,7 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         "key": result.get("key"),
         "qber": result.get("qber"),
         "sifted_bits": result.get("sifted_bits"),
+        "key_bits": result.get("key_bits"),          # sifted minus disclosed sample
         "num_sampled": result.get("num_sampled"),
         "secure_fraction": result.get("secure_fraction"),
         "final_key_bits": result.get("final_key_bits"),

@@ -319,10 +319,15 @@ class DistributedBB84(BB84):
                 self._pop(info=self.key)
                 self.final_keys.append(self.key)
                 key_int = self.key
+            # Bob now knows QBER too — report the same secure metrics as Alice
+            # so both result rows are complete (symmetric for sweeps/plots).
+            secure_fraction = BB84Protocol.secure_key_fraction(qber)
             self.metrics = {"qber": qber,
                             "sifted_bits": self._bob_sifted_count,
                             "num_sampled": self._bob_num_sampled,
-                            "key_bits": len(self._bob_key_order)}
+                            "key_bits": len(self._bob_key_order),
+                            "secure_fraction": secure_fraction,
+                            "final_key_bits": int(len(self._bob_key_order) * secure_fraction)}
             self.working = False
             if self.on_key:
                 self.on_key(self.role, {"key": key_int, **self.metrics})
