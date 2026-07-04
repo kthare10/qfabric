@@ -307,6 +307,34 @@ correct.
 This pluggability is exactly the "Both" decision: **BB84 uses §6.1; Phase-4
 entanglement protocols use §6.2** — same runner, different `quantum_manager`.
 
+### 6.3 Implemented: E91 / BBM92 on the state service (Phase E1)
+
+`qstate_core.py` (`QStateRegister`) + `quantum_state_service.py`
+(`QuantumStateService`) realize §6.2. Two deliberate deviations from the sketch,
+both driven by *distribution* being the actual requirement:
+
+- **Own n-qubit numpy register, not SeQUeNCe's `QuantumManager`.** SeQUeNCe's
+  manager is inherently a single in-process object — the very reason nothing in it
+  spans the two FABRIC processes — so the cross-process authority must be ours
+  regardless. A small, fully-tested numpy register (Bell-pair create, arbitrary
+  X–Z-plane projective measurement driven by a reproducible sample, exact
+  post-measurement partial trace) is more controllable than bending SeQUeNCe's
+  fixed gate set to arbitrary CHSH angles, and it keeps the id-keyed multi-qubit
+  register that entanglement *swapping* (a Bell measurement on two register qubits)
+  will extend — "designed for multi-hop".
+- **Werner-state noise, `w = fidelity`.** Per pair we emit `|Φ+⟩` with the Werner
+  mass and otherwise a uniformly-chosen Bell state; averaged over shots this is
+  ρ = F·|Φ+⟩⟨Φ+| + (1−F)·I/4. This gives matching-basis **QBER = (1−F)/2** *and*
+  **CHSH S = 2√2·F** from one knob, so the key-error rate and the Bell-violation
+  security test degrade together (S ≤ 2 exactly at F = 1/√2). It also keeps the
+  `fidelity` scenario knob identical to the BB84 path, so cross-comparison is direct.
+
+E91/BBM92 protocol logic (`e91.py`) is transport-independent: it drives a session
+against a *service object*, so the identical protocol runs in-process (validated,
+`tests/test_e91.py`) and — next — against a `RemoteQuantumManager` proxy over the
+Link. Sifting/QBER reuse `qne.bb84.BB84Protocol`; the CHSH quartet gives the Bell
+test. Modes: `bbm92` (Z/X, key-efficient) and `e91` (adds the CHSH certification).
+
 ---
 
 ## 7. Wire codec — serializing SeQUeNCe messages
@@ -511,8 +539,10 @@ qne-sequence/
   distributed_qkd.py         DistributedBB84 / DistributedCascade (message-converted §8.1)
   guarded_stub.py            GuardedRemoteStub — runtime `another`-access gate (§8.1)
   node_runner.py             CLI: build local slice, wire channels, run
-  qstate_service.py          QuantumStateService + RemoteQuantumManager (Phase F)
-  topology.py                placement-aware topology + splitter
+  qstate_core.py             QStateRegister — n-qubit numpy register (Bell pairs, angle measurement, Werner noise)
+  quantum_state_service.py   QuantumStateService — the shared entanglement authority (§6.3)
+  e91.py                     E91 / BBM92 entanglement-based QKD (CHSH Bell test; sift/QBER reuse BB84Protocol)
+  topology.py                placement-aware topology + splitter (planned)
   configs/                   example 2-node BB84 configs (loopback, veth, FABRIC)
   tests/                     codec contract tests, 2-proc BB84 smoke test
 ```

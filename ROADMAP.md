@@ -80,9 +80,9 @@ Priority order from the research plan:
 
 | Protocol | Status | Notes |
 |----------|--------|-------|
-| **BB84 QKD** | ✅ | Prepare-and-measure baseline |
-| **E91 QKD** | ⬜ | Requires Bell-test coordination over the classical channel |
-| **Entanglement swapping** (repeaters) | ⬜ | Highest novelty; needs quantum-memory + herald signaling |
+| **BB84 QKD** | ✅ | Prepare-and-measure baseline (`qne/`, `qne-sequence/`) |
+| **E91 / BBM92 QKD** | 🟡 | Entanglement-based QKD validated **in-process** on the shared quantum-state service (`qne-sequence/qstate_core.py`, `e91.py`): Werner-state model ties QBER=(1−F)/2 and CHSH S=2√2·F; sift/QBER reuse `BB84Protocol`. Distributed-over-the-wire (RemoteQuantumManager) is the next step. |
+| **Entanglement swapping** (repeaters) | ⬜ | Highest novelty; the n-qubit register + state service are designed for it (Bell-measurement swap on two register qubits + heralding). |
 | **Quantum teleportation** | ⬜ | Stretch goal; classical bits per teleport |
 
 ---
@@ -100,7 +100,7 @@ Priority order from the research plan:
 
 ## Known Limitations (today)
 
-- Photons are modeled at the bit/basis level, not as full quantum states — no entanglement or multi-qubit support yet.
+- The `qne/` hand-coded path models photons at the bit/basis level (no entanglement). Entanglement (E91/BBM92) lives in `qne-sequence/` on a shared multi-qubit **quantum-state service** — validated in-process; distributing it over the wire is in progress.
 - QBER comes from a depolarizing polarization-misalignment model (≈ (1−F)/2) plus dark counts; phase/timing error sources (`dead_time`, `timing_jitter`) are not yet modeled.
 - Memoryless per-packet loss — no burst loss or correlated fading.
 - Single wavelength, single link per run.
