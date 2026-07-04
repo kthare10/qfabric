@@ -37,6 +37,8 @@ secrets/
 !results/fabric_bob_results.json
 !results/fabric_seq_alice.json
 !results/fabric_seq_bob.json
+!results/fabric_e91_alice.json
+!results/fabric_e91_bob.json
 !qne-sequence/results/sequence_scenarios.json
 *.pcap
 

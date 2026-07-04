@@ -1069,6 +1069,94 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
     return a_res, b_res
 
 
+def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
+                     distance_km=1.0, attenuation=0.2, mode="e91",
+                     sample_fraction=0.2, port=5100,
+                     bob_data_ip="10.10.1.2", venv=".venv-qne"):
+    """Run distributed E91/BBM92 entanglement-based QKD across the slice.
+
+    Unlike BB84, entanglement has **no photon plane / no P4 switch**: Alice hosts
+    the shared quantum-state service (the entangled register), Bob measures his
+    halves via RPC, and only the classical coordination (basis announcement, QBER
+    sample + CHSH bits) rides the real data-plane link — that WAN path is the
+    research lever. Fiber loss (distance/attenuation) is applied as pair loss in
+    the service, so ``distance_km``/``attenuation`` still shape the detected count.
+
+    ``mode`` is 'e91' (adds the CHSH Bell test) or 'bbm92' (Z/X, key-efficient).
+    Prereqs: slice up with data-plane IPs (notebook 01) and setup_sequence_runtime().
+    Returns (alice_result, bob_result) dicts.
+    """
+    import json as _json
+
+    alice = slice_obj.get_node("alice")
+    bob = slice_obj.get_node("bob")
+
+    print(f"\n=== Running distributed E91/BBM92 ({mode}, no switch) ===")
+    print(f"  Bob classical TCP {bob_data_ip}:{port} | pairs={num_pairs} "
+          f"F={fidelity} dist={distance_km}km atten={attenuation}dB/km "
+          f"sample_frac={sample_fraction}")
+
+    for node in (alice, bob):
+        node.execute("sudo pkill -f qne_sequence.node_runner 2>/dev/null; "
+                     "sudo rm -f /tmp/e91_*.log; sleep 1", quiet=True)
+
+    common = (f"--protocol {mode} --num-pairs {num_pairs} --fidelity {fidelity} "
+              f"--distance-km {distance_km} --attenuation {attenuation} "
+              f"--sample-fraction {sample_fraction} --port {port}")
+    # no raw sockets / no root needed — entanglement uses only the TCP link
+    runner = (f"cd ~/qfabric/qne-sequence && env PYTHONPATH=$HOME/qfabric "
+              f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner")
+
+    print("  Starting Bob (listener)...")
+    bob_thread = bob.execute_thread(
+        f"{runner} --role bob --name bob --peer alice --host 0.0.0.0 "
+        f"{common} 2>&1 | tee /tmp/e91_bob.log")
+    time.sleep(8)  # let Bob open the TCP listener
+
+    print("  Starting Alice (state-service host)...")
+    alice_thread = alice.execute_thread(
+        f"{runner} --role alice --name alice --peer bob --host {bob_data_ip} "
+        f"{common} 2>&1 | tee /tmp/e91_alice.log")
+
+    print("  Waiting for Alice...")
+    a_out = alice_thread.result()
+    time.sleep(5)
+    try:
+        b_out = bob_thread.result()
+    except Exception as e:
+        b_out = ("", str(e))
+
+    def _parse(out):
+        for line in reversed(str(out[0]).splitlines()):
+            line = line.strip()
+            if line.startswith("{") and '"role"' in line:
+                try:
+                    return _json.loads(line)
+                except _json.JSONDecodeError:
+                    pass
+        return None
+
+    a_res, b_res = _parse(a_out), _parse(b_out)
+
+    results_dir = PROJECT_DIR / "results"
+    results_dir.mkdir(exist_ok=True)
+    if a_res:
+        (results_dir / "fabric_e91_alice.json").write_text(_json.dumps(a_res, indent=2))
+    if b_res:
+        (results_dir / "fabric_e91_bob.json").write_text(_json.dumps(b_res, indent=2))
+
+    print(f"\n=== Distributed E91/BBM92 Results ({mode}) ===")
+    for who, r in (("alice", a_res), ("bob", b_res)):
+        if r:
+            print(f"  [{who}] detected={r.get('detected_pairs')} "
+                  f"sifted={r.get('sifted_bits')} qber={r.get('qber')} "
+                  f"CHSH_S={r.get('chsh_s')} secure_fraction={r.get('secure_fraction')} "
+                  f"key={'yes' if r.get('key') is not None else 'no'}")
+        else:
+            print(f"  [{who}] no JSON result — check /tmp/e91_{who}.log on the node")
+    return a_res, b_res
+
+
 def cleanup(fablib, slice_name: str):
     """Delete the FABRIC slice."""
     print(f"\n=== Deleting slice '{slice_name}' ===")
