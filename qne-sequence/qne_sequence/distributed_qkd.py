@@ -66,7 +66,8 @@ class DistributedBB84(BB84):
     def __init__(self, owner, name, lightsource, qsdetector, role=-1,
                  seed: int = 0, on_key=None, detector=None,
                  sample_fraction: float = 0.1, num_pulses: int | None = None,
-                 photon_mode: str = "bulk", photon_drain_ps: int = 0):
+                 photon_mode: str = "bulk", photon_drain_ps: int = 0,
+                 eavesdropper=None):
         super().__init__(owner, name, lightsource, qsdetector, role)
         # QKDNode.receive_message (sequence 1.0.0) routes to the first protocol whose
         # protocol_type is truthy; the base Protocol leaves it "" (falsy). Set it so
@@ -75,6 +76,7 @@ class DistributedBB84(BB84):
         self.rng = numpy.random.default_rng(seed)
         self.on_key = on_key            # callback(role, info_dict) when a key completes
         self.detector = detector        # qne.detector.Detector (Bob); None on Alice
+        self.eavesdropper = eavesdropper  # qne.eve.InterceptResendEve on the channel; None = no Eve
         self.sample_fraction = sample_fraction
         self.num_pulses_override = num_pulses
         self.photon_mode = photon_mode
@@ -195,6 +197,12 @@ class DistributedBB84(BB84):
             # record now — BEGIN would wipe the records; replay after BEGIN.
             self._pre_begin_pulses.extend(pulses)
             return
+        # Eve (if present) intercepts in transit: she measures each photon in a
+        # random basis and resends her result, so the photon Bob's detector sees
+        # carries Eve's (basis, bit). Alice still announces her ORIGINAL basis for
+        # sifting, so a wrong-basis interception surfaces as a bit error.
+        if self.eavesdropper is not None:
+            pulses = self.eavesdropper.intercept_pulses(pulses)
         for seq, a_basis, a_bit in pulses:
             photon = types.SimpleNamespace(basis=int(a_basis), state=int(a_bit),
                                            sequence_num=int(seq))
@@ -328,6 +336,8 @@ class DistributedBB84(BB84):
                             "key_bits": len(self._bob_key_order),
                             "secure_fraction": secure_fraction,
                             "final_key_bits": int(len(self._bob_key_order) * secure_fraction)}
+            if self.eavesdropper is not None:
+                self.metrics.update(self.eavesdropper.stats)
             self.working = False
             if self.on_key:
                 self.on_key(self.role, {"key": key_int, **self.metrics})

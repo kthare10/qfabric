@@ -53,7 +53,7 @@ The prepare-and-measure QKD path produces correct QBER / sift / secure-fraction
 *estimates*, but several pieces needed for an end-to-end, defensible secret key —
 and for the security story a reviewer expects — are not yet built. Ordered by value:
 
-- ⬜ **Adversary model (the missing security demonstration).** An intercept-resend Eve (and, optionally, a beam-splitting / PNS Eve) that taps a configurable fraction of photons — show QBER rise and the secure key rate collapse past the ~11% threshold. Nothing today exercises the "we detect eavesdropping" claim. → pairs with an eavesdropper demo notebook.
+- ✅ **Adversary model — intercept-resend Eve.** `qne/eve.py`; taps a configurable fraction `f` of photons and is wired into the distributed BB84 path (`node_runner --eve-fraction f`). Verified end-to-end: sifted QBER ≈ 0.25·f and the secure fraction collapses to 0 past the ~11% threshold (f=1 → QBER ≈ 0.25). A beam-splitting / PNS Eve and an Eve-on-E91 variant are still open. → still pairs with an eavesdropper demo notebook (pending).
 - ⬜ **Reconciliation on the BB84 path.** `qne/cascade.py` is wired into E91 only; wire it into `qne/bob.py` + `qne-sequence` `distributed_qkd.py` (same parity-oracle pattern) so prepare-and-measure keys also match bit-for-bit.
 - ⬜ **Real privacy amplification.** Replace the asymptotic estimate with an actual extractor (Toeplitz / 2-universal hashing) that outputs the final secret key and a leak-adjusted length.
 - ⬜ **Finite-key security.** Report a finite-key secure length (Lim et al. / Tomamichel) alongside the asymptotic Shor–Preskill rate — the honest number for a run of N pulses, and it ties directly to "how long must we run over a real WAN."
@@ -118,7 +118,7 @@ Priority order from the research plan:
 
 - The `qne/` hand-coded path models photons at the bit/basis level (no entanglement). Entanglement (E91/BBM92) lives in `qne-sequence/` on a shared multi-qubit **quantum-state service**, running distributed over 2 nodes; multi-hop entanglement swapping (repeater chains) is the next extension.
 - QBER comes from a depolarizing polarization-misalignment model (≈ (1−F)/2) plus dark counts; phase/timing error sources (`dead_time`, `timing_jitter`) are not yet modeled.
-- **No adversary model yet** — the eavesdropping-detection claim is not demonstrated in code; measured QBER reflects channel noise only (see Phase 2b).
+- Adversary model available for the BB84 path (`qne/eve.py`, intercept-resend, `--eve-fraction`) — measured QBER then reflects channel noise **plus** eavesdropping. A beam-splitting / PNS Eve and an Eve-on-E91 path are still open (see Phase 2b).
 - **Security is asymptotic** (Shor–Preskill secure fraction): no finite-key bound, no real privacy-amplification extractor, and the classical channel is unauthenticated.
 - **BB84 keys are not yet reconciled** — Cascade runs on the E91 path only, so the prepare-and-measure path reports a secure-fraction *estimate* rather than a bit-for-bit matching secret key.
 - Memoryless per-packet loss — no burst loss or correlated fading.

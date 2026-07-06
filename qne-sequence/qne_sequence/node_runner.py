@@ -56,7 +56,7 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
              photon_iface: str | None = None, src_mac: str = "02:00:00:00:00:01",
              dst_mac: str = "02:00:00:00:00:02", wavelength: int = 0,
              photon_drain_ms: float = 200.0, loss: str = "auto",
-             photon_rate_hz: float = 10000.0) -> dict:
+             photon_rate_hz: float = 10000.0, eve_fraction: float = 0.0) -> dict:
     role = _ROLES[role_name]
 
     # Photon loss policy (independent of transport):
@@ -85,12 +85,18 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
     # raw mode: photons (P4 path) race the TCP QUBITS_DONE marker -> drain window
     drain_ps = int(photon_drain_ms * 1e9) if quantum_transport == "raw" else 0
 
+    # Eavesdropper on the quantum channel (Bob receives Eve's resent photons).
+    eve = None
+    if role == 1 and eve_fraction > 0.0:
+        from qne.eve import InterceptResendEve
+        eve = InterceptResendEve(eve_fraction, seed=seed + 555)
+
     # swap in the distributed BB84 protocol
     dbb = DistributedBB84(node, f"{name}.BB84", f"{name}.lightsource",
                           f"{name}.qsdetector", role=role, seed=seed, on_key=on_key,
                           detector=detector, sample_fraction=sample_fraction,
                           num_pulses=num_pulses, photon_mode=photon_mode,
-                          photon_drain_ps=drain_ps)
+                          photon_drain_ps=drain_ps, eavesdropper=eve)
     node.set_protocol_layer(0, dbb)
     pair_distributed(dbb, role, f"{peer}.BB84", peer)
 
@@ -162,6 +168,8 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         "elapsed_s": result.get("elapsed_s"),
         "photons_per_s": result.get("photons_per_s"),
         "loss_probability": 0.0 if loss_where == "none" else loss_probability(distance_km, attenuation),
+        "eve_fraction": eve_fraction,
+        "eve_photons_intercepted": result.get("eve_photons_intercepted"),
         "tx_frames": link.tx_count,
         "rx_frames": link.rx_count,
         "remote_access_errors": len(tl.remote_access_errors),
@@ -222,6 +230,9 @@ def main(argv=None) -> int:
                          "drops masquerade as fiber loss)")
     ap.add_argument("--photon-drain-ms", type=float, default=200.0,
                     help="raw mode: wait for straggler photons after QUBITS_DONE")
+    ap.add_argument("--eve-fraction", type=float, default=0.0,
+                    help="intercept-resend eavesdropper: fraction of photons Eve taps "
+                         "[0,1]. Adds QBER ~ 0.25*f on the sifted key (BB84 path).")
     args = ap.parse_args(argv)
 
     if args.protocol in ("e91", "bbm92"):
@@ -244,7 +255,7 @@ def main(argv=None) -> int:
                       args.sample_fraction, args.num_pulses or None, args.photon_mode,
                       args.quantum_transport, args.photon_iface, args.src_mac,
                       args.dst_mac, args.wavelength, args.photon_drain_ms, args.loss,
-                      args.photon_rate_hz)
+                      args.photon_rate_hz, args.eve_fraction)
     print(json.dumps(result))
     return 0
 
