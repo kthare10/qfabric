@@ -18,9 +18,13 @@ at the shared un-sampled key positions, so the raw key never transits the link
 
 from __future__ import annotations
 
+from functools import reduce
+from operator import xor
+
 import numpy as np
 
 from qne.bb84 import BB84Protocol
+from qne.cascade import reconcile
 from .quantum_state_service import QuantumStateService
 from .remote_qm import RpcChannel, RemoteQuantumManager
 from .e91 import _ANGLE, _MODES, _CHSH, chsh_value
@@ -41,7 +45,8 @@ def _bits_to_int(bits):
 def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
                  num_pairs: int = 20000, fidelity: float = 0.98,
                  loss_probability: float = 0.0, mode: str = "e91",
-                 sample_fraction: float = 0.1, seed: int = 0) -> dict:
+                 sample_fraction: float = 0.1, seed: int = 0,
+                 do_reconcile: bool = True, cascade_passes: int = 4) -> dict:
     """Run one side of a distributed E91/BBM92 session; return the result dict."""
     spec = _MODES[mode]
     key_codes = set(spec["key"])
@@ -56,10 +61,11 @@ def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
     try:
         if role == 0:
             result = _run_alice(rpc, spec, key_codes, num_pairs, fidelity,
-                                loss_probability, mode, sample_fraction, seed)
+                                loss_probability, mode, sample_fraction, seed,
+                                do_reconcile)
         else:
             result = _run_bob(rpc, spec, key_codes, num_pairs, mode,
-                              sample_fraction, seed)
+                              sample_fraction, seed, do_reconcile, cascade_passes)
     finally:
         link.close()
 
@@ -70,7 +76,7 @@ def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
 
 
 def _run_alice(rpc, spec, key_codes, num_pairs, fidelity, loss_probability,
-               mode, sample_fraction, seed):
+               mode, sample_fraction, seed, do_reconcile):
     svc = QuantumStateService(seed=seed)
     a_rng = np.random.default_rng(seed + 101)
     pairs = svc.create_pairs(num_pairs, fidelity=fidelity,
@@ -120,11 +126,36 @@ def _run_alice(rpc, spec, key_codes, num_pairs, fidelity, loss_probability,
                "key_bits": len(key_only), "secure_fraction": secure_fraction,
                "final_key_bits": int(len(key_only) * secure_fraction)}
     rpc.send("SUMMARY", summary)
+
+    # Cascade reconciliation: Bob drives, Alice answers parity queries over her
+    # key bits (in the shared key_only order) until Bob signals done.
+    reconciled = False
+    corrections = bits_leaked = 0
+    if do_reconcile and key_only:
+        alice_key_arr = [a_bits[i] for i in key_only]
+        while True:
+            kind, body = rpc.recv_any()
+            if kind == "PARITY_REQ":
+                parities = [reduce(xor, (alice_key_arr[i] for i in blk), 0)
+                            for blk in body["blocks"]]
+                rpc.send("PARITY_RESP", {"parities": parities})
+            elif kind == "RECONCILE_DONE":
+                corrections = body["corrections"]
+                bits_leaked = body["bits_leaked"]
+                reconciled = True
+                break
+            else:
+                raise ValueError(f"unexpected frame during reconciliation: {kind}")
+
     return {"key": alice_key, "detected_pairs": int(sum(surviving)),
-            "num_pairs": num_pairs, **summary}
+            "num_pairs": num_pairs, "reconciled": reconciled,
+            "corrections": corrections, "bits_leaked": bits_leaked,
+            "secure_key_bits": max(0, summary["final_key_bits"] - bits_leaked),
+            **summary}
 
 
-def _run_bob(rpc, spec, key_codes, num_pairs, mode, sample_fraction, seed):
+def _run_bob(rpc, spec, key_codes, num_pairs, mode, sample_fraction, seed,
+             do_reconcile, cascade_passes):
     qm = RemoteQuantumManager(rpc)
     b_rng = np.random.default_rng(seed + 202)
 
@@ -166,6 +197,29 @@ def _run_bob(rpc, spec, key_codes, num_pairs, mode, sample_fraction, seed):
     summary = rpc.recv("SUMMARY")
     sample_set = set(sample_idx)
     key_only = [i for i in key_pos if i not in sample_set]
-    bob_key = _bits_to_int([b_bits[i] for i in key_only])
+    key_arr = [b_bits[i] for i in key_only]
+
+    # Cascade reconciliation: correct Bob's key toward Alice's over the wire.
+    reconciled = False
+    corrections = bits_leaked = 0
+    if do_reconcile and key_only:
+        def parity_oracle(blocks):
+            resp = rpc.call("PARITY_REQ",
+                            {"blocks": [[int(i) for i in b] for b in blocks]},
+                            expected="PARITY_RESP")
+            return resp["parities"]
+
+        res = reconcile(key_arr, parity_oracle, summary["qber"],
+                        passes=cascade_passes, seed=seed + 303)
+        key_arr = res.corrected_key
+        corrections, bits_leaked = res.corrections, res.bits_leaked
+        reconciled = True
+        rpc.send("RECONCILE_DONE", {"corrections": corrections,
+                                    "bits_leaked": bits_leaked})
+
+    bob_key = _bits_to_int(key_arr)
     return {"key": bob_key, "detected_pairs": int(sum(surviving)),
-            "num_pairs": num_pairs, **summary}
+            "num_pairs": num_pairs, "reconciled": reconciled,
+            "corrections": corrections, "bits_leaked": bits_leaked,
+            "secure_key_bits": max(0, summary["final_key_bits"] - bits_leaked),
+            **summary}

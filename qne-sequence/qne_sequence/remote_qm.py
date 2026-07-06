@@ -42,6 +42,12 @@ class RpcChannel:
             raise ValueError(f"expected {expected!r}, got {frame.get(_TAG)!r}")
         return frame["body"]
 
+    def recv_any(self, timeout: float = 120.0) -> tuple[str, dict]:
+        """Receive the next frame, returning (kind, body) — for a serve loop that
+        handles more than one message type (e.g. Cascade parity requests until done)."""
+        frame = self._q.get(timeout=timeout)
+        return frame.get(_TAG), frame["body"]
+
     def call(self, kind: str, body: dict, expected: str, timeout: float = 120.0) -> dict:
         self.send(kind, body)
         return self.recv(expected, timeout=timeout)

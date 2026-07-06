@@ -176,6 +176,11 @@ def main(argv=None) -> int:
                          "(shared quantum-state service; alice hosts the register)")
     ap.add_argument("--num-pairs", type=int, default=20000,
                     help="entanglement protocols: Bell pairs to generate")
+    ap.add_argument("--reconcile", action=argparse.BooleanOptionalAction, default=True,
+                    help="run Cascade error reconciliation so both keys match "
+                         "bit-for-bit (--no-reconcile to skip)")
+    ap.add_argument("--cascade-passes", type=int, default=4,
+                    help="number of Cascade passes")
     ap.add_argument("--name", required=True)
     ap.add_argument("--peer", required=True)
     ap.add_argument("--host", default="127.0.0.1")
@@ -227,7 +232,8 @@ def main(argv=None) -> int:
             _ROLES[args.role], args.name, args.peer, args.host, args.port,
             num_pairs=args.num_pairs, fidelity=args.fidelity,
             loss_probability=loss_p, mode=args.protocol,
-            sample_fraction=args.sample_fraction, seed=args.seed)
+            sample_fraction=args.sample_fraction, seed=args.seed,
+            do_reconcile=args.reconcile, cascade_passes=args.cascade_passes)
         print(json.dumps(result))
         return 0
 

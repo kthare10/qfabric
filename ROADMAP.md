@@ -44,7 +44,7 @@ QFabric runs **BB84 QKD over a single emulated link**, end-to-end on a real FABR
 - 🟡 Detector realism: `dead_time` and `timing_jitter` are parsed from config but **not yet modeled**.
 - ✅ Consolidated the secure-key-rate math into `BB84Protocol.secure_key_fraction`, used by the sim path, the live Bob path, and the simulator adapters.
 - ✅ Removed the vestigial dead code in `Alice`/`Bob._run_sifting`.
-- ⬜ Error correction (e.g., Cascade) and privacy amplification beyond the asymptotic Shor–Preskill estimate.
+- 🟡 Error correction: **Cascade reconciliation implemented** (`qne/cascade.py`), wired into distributed E91/BBM92 so Alice's and Bob's keys match bit-for-bit; `bits_leaked` is tracked. Full privacy amplification (universal hashing) beyond the asymptotic Shor–Preskill estimate is still pending, as is Cascade for the BB84 path.
 - ⬜ GPU-accelerated density-matrix tracking for quantum-memory emulation (needed for entanglement-based protocols).
 
 ## Phase 3 — Cross-Validation ✅ (core)

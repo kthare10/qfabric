@@ -1071,7 +1071,7 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
 
 def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
                      distance_km=1.0, attenuation=0.2, mode="e91",
-                     sample_fraction=0.2, port=5100,
+                     sample_fraction=0.2, reconcile=True, port=5100,
                      bob_data_ip="10.10.1.2", venv=".venv-qne"):
     """Run distributed E91/BBM92 entanglement-based QKD across the slice.
 
@@ -1102,7 +1102,8 @@ def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
 
     common = (f"--protocol {mode} --num-pairs {num_pairs} --fidelity {fidelity} "
               f"--distance-km {distance_km} --attenuation {attenuation} "
-              f"--sample-fraction {sample_fraction} --port {port}")
+              f"--sample-fraction {sample_fraction} "
+              f"{'--reconcile' if reconcile else '--no-reconcile'} --port {port}")
     # no raw sockets / no root needed — entanglement uses only the TCP link
     runner = (f"cd ~/qfabric/qne-sequence && env PYTHONPATH=$HOME/qfabric "
               f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner")
@@ -1150,10 +1151,14 @@ def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
         if r:
             print(f"  [{who}] detected={r.get('detected_pairs')} "
                   f"sifted={r.get('sifted_bits')} qber={r.get('qber')} "
-                  f"CHSH_S={r.get('chsh_s')} secure_fraction={r.get('secure_fraction')} "
+                  f"CHSH_S={r.get('chsh_s')} reconciled={r.get('reconciled')} "
+                  f"corrections={r.get('corrections')} leaked={r.get('bits_leaked')} "
+                  f"secure_key_bits={r.get('secure_key_bits')} "
                   f"key={'yes' if r.get('key') is not None else 'no'}")
         else:
             print(f"  [{who}] no JSON result — check /tmp/e91_{who}.log on the node")
+    if a_res and b_res and a_res.get("key") is not None:
+        print(f"  keys match bit-for-bit: {a_res['key'] == b_res['key']}")
     return a_res, b_res
 
 
