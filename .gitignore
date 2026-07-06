@@ -40,6 +40,7 @@ secrets/
 !results/fabric_e91_alice.json
 !results/fabric_e91_bob.json
 !qne-sequence/results/sequence_scenarios.json
+!results/decoy_scenarios.json
 *.pcap
 
 # Personal session tracking — never ship in the artifact

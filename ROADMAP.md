@@ -81,6 +81,7 @@ Priority order from the research plan:
 | Protocol | Status | Notes |
 |----------|--------|-------|
 | **BB84 QKD** | ✅ | Prepare-and-measure baseline (`qne/`, `qne-sequence/`) |
+| **Decoy-state BB84** | ✅ | PNS-resilient key rate (`qne/decoy.py`): weak-coherent Poisson source, 3 intensities, full Lo–Ma–Chen Y1/e1 bounds → GLLP secure key rate; sweep + figure via `scripts/decoy_sweep.py`. Analysis/simulation arm (not yet wired into the live multi-intensity transport). |
 | **E91 / BBM92 QKD** | ✅ | Entanglement-based QKD on the shared quantum-state service (`qne-sequence/qstate_core.py`, `e91.py`), running **distributed over 2 nodes** (`distributed_e91.py`, `remote_qm.py`; `--protocol e91\|bbm92`). Werner-state model ties QBER=(1−F)/2 and CHSH S=2√2·F; Bell-test coordination + basis/sample disclosure ride the real link; sift/QBER reuse `BB84Protocol`. |
 | **Entanglement swapping** (repeaters) | ⬜ | Highest novelty; the n-qubit register + state service are designed for it (Bell-measurement swap on two register qubits + heralding). |
 | **Quantum teleportation** | ⬜ | Stretch goal; classical bits per teleport |
