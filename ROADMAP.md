@@ -47,6 +47,21 @@ QFabric runs **BB84 QKD over a single emulated link**, end-to-end on a real FABR
 - 🟡 Error correction: **Cascade reconciliation implemented** (`qne/cascade.py`), wired into distributed E91/BBM92 so Alice's and Bob's keys match bit-for-bit; `bits_leaked` is tracked. Full privacy amplification (universal hashing) beyond the asymptotic Shor–Preskill estimate is still pending, as is Cascade for the BB84 path.
 - ⬜ GPU-accelerated density-matrix tracking for quantum-memory emulation (needed for entanglement-based protocols).
 
+## Phase 2b — QKD security & post-processing depth ⬜
+
+The prepare-and-measure QKD path produces correct QBER / sift / secure-fraction
+*estimates*, but several pieces needed for an end-to-end, defensible secret key —
+and for the security story a reviewer expects — are not yet built. Ordered by value:
+
+- ⬜ **Adversary model (the missing security demonstration).** An intercept-resend Eve (and, optionally, a beam-splitting / PNS Eve) that taps a configurable fraction of photons — show QBER rise and the secure key rate collapse past the ~11% threshold. Nothing today exercises the "we detect eavesdropping" claim. → pairs with an eavesdropper demo notebook.
+- ⬜ **Reconciliation on the BB84 path.** `qne/cascade.py` is wired into E91 only; wire it into `qne/bob.py` + `qne-sequence` `distributed_qkd.py` (same parity-oracle pattern) so prepare-and-measure keys also match bit-for-bit.
+- ⬜ **Real privacy amplification.** Replace the asymptotic estimate with an actual extractor (Toeplitz / 2-universal hashing) that outputs the final secret key and a leak-adjusted length.
+- ⬜ **Finite-key security.** Report a finite-key secure length (Lim et al. / Tomamichel) alongside the asymptotic Shor–Preskill rate — the honest number for a run of N pulses, and it ties directly to "how long must we run over a real WAN."
+- ⬜ **Authenticated classical channel.** BB84's proof requires an *authenticated* classical channel; today it's plain TCP. Add a Wegman–Carter / HMAC tag on the sifting messages and account for the authentication-key cost — also a networking-overhead result (auth cost vs WAN RTT).
+- ⬜ **Decoy on the live transport.** `qne/decoy.py` is analysis-only; have Alice emit multi-intensity pulses over the P4/TCP path and Bob bin detections by intensity, so the PNS-resilience story runs on real hardware, not just in a sweep script.
+- ⬜ **Efficient (biased-basis) BB84.** Asymmetric Z/X basis probabilities to lift sifting above 50% and raise the key rate — a cheap, cited win and a natural sweep axis.
+- 🟡 **Detector realism.** Model `dead_time` and `timing_jitter` (parsed today but ignored) so the detector arm is honest and adds a knob.
+
 ## Phase 3 — Cross-Validation ✅ (core)
 
 - ✅ Platform-neutral `ValidationScenario`; standalone `--json` adapters; on-node + subprocess runners.
@@ -103,6 +118,9 @@ Priority order from the research plan:
 
 - The `qne/` hand-coded path models photons at the bit/basis level (no entanglement). Entanglement (E91/BBM92) lives in `qne-sequence/` on a shared multi-qubit **quantum-state service**, running distributed over 2 nodes; multi-hop entanglement swapping (repeater chains) is the next extension.
 - QBER comes from a depolarizing polarization-misalignment model (≈ (1−F)/2) plus dark counts; phase/timing error sources (`dead_time`, `timing_jitter`) are not yet modeled.
+- **No adversary model yet** — the eavesdropping-detection claim is not demonstrated in code; measured QBER reflects channel noise only (see Phase 2b).
+- **Security is asymptotic** (Shor–Preskill secure fraction): no finite-key bound, no real privacy-amplification extractor, and the classical channel is unauthenticated.
+- **BB84 keys are not yet reconciled** — Cascade runs on the E91 path only, so the prepare-and-measure path reports a secure-fraction *estimate* rather than a bit-for-bit matching secret key.
 - Memoryless per-packet loss — no burst loss or correlated fading.
 - Single wavelength, single link per run.
 - P4 and Python RNGs are independent — reproducibility holds within a backend, not bit-for-bit across the P4 and Python paths.
