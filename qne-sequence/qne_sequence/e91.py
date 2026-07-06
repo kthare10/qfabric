@@ -130,13 +130,24 @@ def run_session(service, num_pairs: int, *, fidelity: float = 1.0,
 
     proto = BB84Protocol(sample_fraction=sample_fraction, seed=bob_seed + 11)
     sifted = proto.sift(alice_log, bob_log)
-    qest = proto.estimate_qber(sifted)
+
+    # Disclose a RANDOM sample for QBER, then form the key from the positions that
+    # were NOT disclosed. (Slicing off the first n_sample would leave some of the
+    # publicly revealed bits inside the key — see review H2; this mirrors the
+    # distributed path's key_only logic exactly.)
+    n = sifted.sifted_count
+    rng = np.random.default_rng(bob_seed + 11)
+    n_sample = BB84Protocol.sample_size(n, sample_fraction)
+    sample_idx = set(rng.choice(n, size=n_sample, replace=False).tolist()) if n_sample else set()
+    qest = BB84Protocol.qber_from_disclosed(
+        [sifted.alice_bits[i] for i in sorted(sample_idx)],
+        [sifted.bob_bits[i] for i in sorted(sample_idx)])
     krate = proto.compute_key_rate(sifted, qest, num_pairs)
 
-    # form the shared keys from the un-sampled sifted bits (sample bits disclosed)
-    n_sample = qest.num_sampled
-    a_key_bits = sifted.alice_bits[n_sample:]
-    b_key_bits = sifted.bob_bits[n_sample:]
+    key_idx = [i for i in range(n) if i not in sample_idx]
+    a_key_bits = [sifted.alice_bits[i] for i in key_idx]
+    b_key_bits = [sifted.bob_bits[i] for i in key_idx]
+
     def to_int(bits):
         return int("".join(str(b) for b in bits), 2) if bits else None
 

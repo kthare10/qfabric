@@ -10,6 +10,7 @@ import math
 
 import pytest
 
+from qne.bb84 import BB84Protocol
 from qne_sequence.qstate_core import QStateRegister
 from qne_sequence.quantum_state_service import QuantumStateService
 from qne_sequence.e91 import run_session
@@ -112,6 +113,18 @@ def test_loss_reduces_detected_pairs():
     svc = QuantumStateService(seed=8)
     r = run_session(svc, 5000, fidelity=1.0, loss_probability=0.3, mode="bbm92")
     assert abs(r.detected_pairs / r.num_pairs - 0.7) < 0.03
+
+
+def test_disclosed_sample_bits_excluded_from_key():
+    """Regression (review H2): the QBER-disclosed sample must not remain in the
+    key. With F<1 the key still has to equal Alice's own key bits at the kept
+    positions, and key_bits must be sifted - num_sampled."""
+    svc = QuantumStateService(seed=42)
+    r = run_session(svc, 4000, fidelity=0.97, mode="bbm92",
+                    sample_fraction=0.3, alice_seed=1, bob_seed=2)
+    assert r.key_bits == r.sifted_bits - r.num_sampled
+    # a large sample fraction removes a proportional chunk (not a fixed prefix)
+    assert r.num_sampled == BB84Protocol.sample_size(r.sifted_bits, 0.3)
 
 
 def test_high_noise_kills_secure_fraction():

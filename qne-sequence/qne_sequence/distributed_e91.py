@@ -42,6 +42,22 @@ def _bits_to_int(bits):
     return int("".join(str(b) for b in bits), 2) if bits else None
 
 
+def _secure_key_bits(key_bits, qber, bits_leaked, reconciled):
+    """Extractable secret bits after Cascade + privacy amplification.
+
+    Privacy amplification removes Eve's information ≈ key_bits·H(Q); Cascade
+    already disclosed ``bits_leaked`` for error correction. So the secret length
+    is key_bits·(1−H(Q)) − bits_leaked. (Do NOT subtract bits_leaked from
+    ``final_key_bits`` = key_bits·(1−2H(Q)) — that Shor–Preskill figure already
+    charges an asymptotic H(Q) for EC, so subtracting the real EC cost too
+    double-counts it; see review H1.) Zero until keys actually match.
+    """
+    if not reconciled:
+        return 0
+    h = BB84Protocol.binary_entropy(qber)
+    return max(0, int(key_bits * (1.0 - h)) - bits_leaked)
+
+
 def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
                  num_pairs: int = 20000, fidelity: float = 0.98,
                  loss_probability: float = 0.0, mode: str = "e91",
@@ -150,7 +166,8 @@ def _run_alice(rpc, spec, key_codes, num_pairs, fidelity, loss_probability,
     return {"key": alice_key, "detected_pairs": int(sum(surviving)),
             "num_pairs": num_pairs, "reconciled": reconciled,
             "corrections": corrections, "bits_leaked": bits_leaked,
-            "secure_key_bits": max(0, summary["final_key_bits"] - bits_leaked),
+            "secure_key_bits": _secure_key_bits(
+                len(key_only), summary["qber"], bits_leaked, reconciled),
             **summary}
 
 
@@ -221,5 +238,6 @@ def _run_bob(rpc, spec, key_codes, num_pairs, mode, sample_fraction, seed,
     return {"key": bob_key, "detected_pairs": int(sum(surviving)),
             "num_pairs": num_pairs, "reconciled": reconciled,
             "corrections": corrections, "bits_leaked": bits_leaked,
-            "secure_key_bits": max(0, summary["final_key_bits"] - bits_leaked),
+            "secure_key_bits": _secure_key_bits(
+                len(key_only), summary["qber"], bits_leaked, reconciled),
             **summary}
