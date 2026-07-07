@@ -954,7 +954,8 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
                       distance_km=1.0, attenuation=0.2, sample_fraction=0.2,
                       photon_mode="bulk", photon_drain_ms=500, port=5100,
                       bob_data_ip="10.10.1.2", venv=".venv-qne",
-                      transport="raw", loss="auto", photon_rate_hz=10000.0):
+                      transport="raw", loss="auto", photon_rate_hz=10000.0,
+                      eve_fraction=0.0, reconcile=True, cascade_passes=4):
     """Run distributed-SeQUeNCe BB84 across the slice (raw 0x7101 photons via P4).
 
     Runs real SeQUeNCe QKDNode/BB84 instances (via `qne_sequence.node_runner`) on
@@ -1012,6 +1013,8 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
               f"--attenuation {attenuation} --sample-fraction {sample_fraction} "
               f"--photon-mode {photon_mode} --quantum-transport {transport} --loss {loss} "
               f"--photon-drain-ms {photon_drain_ms} --photon-rate-hz {photon_rate_hz} "
+              f"--eve-fraction {eve_fraction} --cascade-passes {cascade_passes} "
+              f"{'--reconcile' if reconcile else '--no-reconcile'} "
               f"--port {port}")
     # raw sockets need root; env sets PYTHONPATH for `import qne`; cwd holds qne_sequence
     runner = (f"cd ~/qfabric/qne-sequence && sudo env PYTHONPATH=$HOME/qfabric "
@@ -1060,12 +1063,16 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
         if r:
             print(f"  [{who}] transport={r.get('quantum_transport')} "
                   f"qber={r.get('qber')} sifted={r.get('sifted_bits')} "
-                  f"final_key_bits={r.get('final_key_bits')} "
+                  f"reconciled={r.get('reconciled')} corrections={r.get('corrections')} "
+                  f"leaked={r.get('bits_leaked')} secure_key_bits={r.get('secure_key_bits')} "
                   f"secure_fraction={r.get('secure_fraction')} "
+                  f"eve_fraction={r.get('eve_fraction')} "
                   f"key={'yes' if r.get('key') is not None else 'no'} "
                   f"remote_access_errors={r.get('remote_access_errors')}")
         else:
             print(f"  [{who}] no JSON result — check /tmp/seq_{who}.log on the node")
+    if a_res and b_res and a_res.get("key") is not None:
+        print(f"  keys match bit-for-bit: {a_res['key'] == b_res['key']}")
     return a_res, b_res
 
 

@@ -56,6 +56,9 @@ REVIEW_*.md
 ASSIGNMENT_*.md
 EXPLORATION.md
 
+# FABRIC (slice) notebook variants — run locally, don't check in
+notebooks/*_fabric.ipynb
+
 # P4 build artifacts
 p4/bmv2/*.json
 p4/bmv2/**/*.json
