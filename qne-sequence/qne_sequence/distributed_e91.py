@@ -18,15 +18,12 @@ at the shared un-sampled key positions, so the raw key never transits the link
 
 from __future__ import annotations
 
-from functools import reduce
-from operator import xor
-
 import numpy as np
 
 from qne.bb84 import BB84Protocol
-from qne.cascade import reconcile
 from .quantum_state_service import QuantumStateService
 from .remote_qm import RpcChannel, RemoteQuantumManager
+from .reconcile_link import bits_to_int, drive_cascade, secure_key_bits, serve_parities
 from .e91 import _ANGLE, _MODES, _CHSH, chsh_value
 from .listener import Link
 
@@ -36,26 +33,6 @@ def _key_positions(a_codes, b_codes, surviving, key_codes):
     return [i for i in range(len(a_codes))
             if surviving[i] and int(a_codes[i]) == int(b_codes[i])
             and int(a_codes[i]) in key_codes]
-
-
-def _bits_to_int(bits):
-    return int("".join(str(b) for b in bits), 2) if bits else None
-
-
-def _secure_key_bits(key_bits, qber, bits_leaked, reconciled):
-    """Extractable secret bits after Cascade + privacy amplification.
-
-    Privacy amplification removes Eve's information ≈ key_bits·H(Q); Cascade
-    already disclosed ``bits_leaked`` for error correction. So the secret length
-    is key_bits·(1−H(Q)) − bits_leaked. (Do NOT subtract bits_leaked from
-    ``final_key_bits`` = key_bits·(1−2H(Q)) — that Shor–Preskill figure already
-    charges an asymptotic H(Q) for EC, so subtracting the real EC cost too
-    double-counts it; see review H1.) Zero until keys actually match.
-    """
-    if not reconciled:
-        return 0
-    h = BB84Protocol.binary_entropy(qber)
-    return max(0, int(key_bits * (1.0 - h)) - bits_leaked)
 
 
 def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
@@ -133,7 +110,7 @@ def _run_alice(rpc, spec, key_codes, num_pairs, fidelity, loss_probability,
     key_pos = _key_positions(a_codes, b_codes, surviving, key_codes)
     sample_set = set(sample_idx)
     key_only = [i for i in key_pos if i not in sample_set]
-    alice_key = _bits_to_int([a_bits[i] for i in key_only])
+    alice_key = bits_to_int([a_bits[i] for i in key_only])
     secure_fraction = BB84Protocol.secure_key_fraction(qest.qber)
 
     summary = {"qber": qest.qber, "qber_ci": list(qest.confidence_interval),
@@ -147,26 +124,14 @@ def _run_alice(rpc, spec, key_codes, num_pairs, fidelity, loss_probability,
     # key bits (in the shared key_only order) until Bob signals done.
     reconciled = False
     corrections = bits_leaked = 0
-    if do_reconcile and key_only:
-        alice_key_arr = [a_bits[i] for i in key_only]
-        while True:
-            kind, body = rpc.recv_any()
-            if kind == "PARITY_REQ":
-                parities = [reduce(xor, (alice_key_arr[i] for i in blk), 0)
-                            for blk in body["blocks"]]
-                rpc.send("PARITY_RESP", {"parities": parities})
-            elif kind == "RECONCILE_DONE":
-                corrections = body["corrections"]
-                bits_leaked = body["bits_leaked"]
-                reconciled = True
-                break
-            else:
-                raise ValueError(f"unexpected frame during reconciliation: {kind}")
+    if do_reconcile and key_only and secure_fraction > 0:   # abort above ~11% QBER
+        reconciled, corrections, bits_leaked = serve_parities(
+            rpc, [a_bits[i] for i in key_only])
 
     return {"key": alice_key, "detected_pairs": int(sum(surviving)),
             "num_pairs": num_pairs, "reconciled": reconciled,
             "corrections": corrections, "bits_leaked": bits_leaked,
-            "secure_key_bits": _secure_key_bits(
+            "secure_key_bits": secure_key_bits(
                 len(key_only), summary["qber"], bits_leaked, reconciled),
             **summary}
 
@@ -219,25 +184,15 @@ def _run_bob(rpc, spec, key_codes, num_pairs, mode, sample_fraction, seed,
     # Cascade reconciliation: correct Bob's key toward Alice's over the wire.
     reconciled = False
     corrections = bits_leaked = 0
-    if do_reconcile and key_only:
-        def parity_oracle(blocks):
-            resp = rpc.call("PARITY_REQ",
-                            {"blocks": [[int(i) for i in b] for b in blocks]},
-                            expected="PARITY_RESP")
-            return resp["parities"]
-
-        res = reconcile(key_arr, parity_oracle, summary["qber"],
-                        passes=cascade_passes, seed=seed + 303)
-        key_arr = res.corrected_key
-        corrections, bits_leaked = res.corrections, res.bits_leaked
+    if do_reconcile and key_only and summary["secure_fraction"] > 0:  # abort above ~11% QBER
+        key_arr, corrections, bits_leaked = drive_cascade(
+            rpc, key_arr, summary["qber"], seed + 303, passes=cascade_passes)
         reconciled = True
-        rpc.send("RECONCILE_DONE", {"corrections": corrections,
-                                    "bits_leaked": bits_leaked})
 
-    bob_key = _bits_to_int(key_arr)
+    bob_key = bits_to_int(key_arr)
     return {"key": bob_key, "detected_pairs": int(sum(surviving)),
             "num_pairs": num_pairs, "reconciled": reconciled,
             "corrections": corrections, "bits_leaked": bits_leaked,
-            "secure_key_bits": _secure_key_bits(
+            "secure_key_bits": secure_key_bits(
                 len(key_only), summary["qber"], bits_leaked, reconciled),
             **summary}

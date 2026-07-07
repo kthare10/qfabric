@@ -56,7 +56,8 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
              photon_iface: str | None = None, src_mac: str = "02:00:00:00:00:01",
              dst_mac: str = "02:00:00:00:00:02", wavelength: int = 0,
              photon_drain_ms: float = 200.0, loss: str = "auto",
-             photon_rate_hz: float = 10000.0, eve_fraction: float = 0.0) -> dict:
+             photon_rate_hz: float = 10000.0, eve_fraction: float = 0.0,
+             do_reconcile: bool = True, cascade_passes: int = 4) -> dict:
     role = _ROLES[role_name]
 
     # Photon loss policy (independent of transport):
@@ -147,22 +148,51 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
     # safety stop so a hung run can't block forever
     tl.stop_time = _START_BARRIER_PS + int(60e12)
     tl.run()
-    link.close()
     if raw_rx is not None:
         raw_rx.stop()
 
+    # Cascade reconciliation over the (now idle) TCP link: Bob corrects his key
+    # toward Alice's bit-for-bit. Both sides hold key_bits in the same key_order;
+    # we swap the link into synchronous RPC mode now that the timeline has stopped.
+    from .remote_qm import RpcChannel
+    from .reconcile_link import bits_to_int, drive_cascade, secure_key_bits, serve_parities
+
+    reconciled = False
+    corrections = bits_leaked = 0
+    key_bits = list(getattr(dbb, "key_bits", None) or [])   # aligned key on both sides
+    qber = dbb.metrics.get("qber", 0.0)
+    # Above the ~11% threshold there's no secure key, so abort rather than waste
+    # effort reconciling. Both sides see the same QBER, so they agree (no deadlock).
+    secure_ok = dbb.metrics.get("secure_fraction", 0.0) > 0
+    if do_reconcile and key_bits and secure_ok:
+        rpc = RpcChannel(link)   # rebinds link.on_frame to a buffered queue
+        if role == 1:            # Bob drives; his key gets corrected toward Alice's
+            key_bits, corrections, bits_leaked = drive_cascade(
+                rpc, key_bits, qber, seed + 303, passes=cascade_passes)
+            reconciled = True
+        else:                    # Alice answers parity queries over her key
+            reconciled, corrections, bits_leaked = serve_parities(rpc, key_bits)
+
+    link.close()
+
+    # Report the full aligned key (both sides) — reconciled → identical bit-for-bit.
+    reconciled_key = bits_to_int(key_bits) if key_bits else result.get("key")
     return {
         "role": role,
         "name": name,
         "quantum_transport": quantum_transport,
         "loss_where": loss_where,
-        "key": result.get("key"),
+        "key": reconciled_key,                       # post-Cascade key (Bob corrected)
         "qber": result.get("qber"),
         "sifted_bits": result.get("sifted_bits"),
         "key_bits": result.get("key_bits"),          # sifted minus disclosed sample
         "num_sampled": result.get("num_sampled"),
         "secure_fraction": result.get("secure_fraction"),
         "final_key_bits": result.get("final_key_bits"),
+        "reconciled": reconciled,
+        "corrections": corrections,
+        "bits_leaked": bits_leaked,
+        "secure_key_bits": secure_key_bits(len(key_bits), qber, bits_leaked, reconciled),
         "photon_mode": result.get("photon_mode", photon_mode),
         "photons_emitted": result.get("photons_emitted"),
         "elapsed_s": result.get("elapsed_s"),
@@ -255,7 +285,8 @@ def main(argv=None) -> int:
                       args.sample_fraction, args.num_pulses or None, args.photon_mode,
                       args.quantum_transport, args.photon_iface, args.src_mac,
                       args.dst_mac, args.wavelength, args.photon_drain_ms, args.loss,
-                      args.photon_rate_hz, args.eve_fraction)
+                      args.photon_rate_hz, args.eve_fraction,
+                      args.reconcile, args.cascade_passes)
     print(json.dumps(result))
     return 0
 

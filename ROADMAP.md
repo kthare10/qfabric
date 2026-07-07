@@ -44,7 +44,7 @@ QFabric runs **BB84 QKD over a single emulated link**, end-to-end on a real FABR
 - 🟡 Detector realism: `dead_time` and `timing_jitter` are parsed from config but **not yet modeled**.
 - ✅ Consolidated the secure-key-rate math into `BB84Protocol.secure_key_fraction`, used by the sim path, the live Bob path, and the simulator adapters.
 - ✅ Removed the vestigial dead code in `Alice`/`Bob._run_sifting`.
-- 🟡 Error correction: **Cascade reconciliation implemented** (`qne/cascade.py`), wired into distributed E91/BBM92 so Alice's and Bob's keys match bit-for-bit; `bits_leaked` is tracked. Full privacy amplification (universal hashing) beyond the asymptotic Shor–Preskill estimate is still pending, as is Cascade for the BB84 path.
+- ✅ Error correction: **Cascade reconciliation** (`qne/cascade.py`) wired into **both** the distributed E91/BBM92 and BB84 paths (shared `qne-sequence/reconcile_link.py`) so Alice's and Bob's keys match bit-for-bit; `bits_leaked` tracked and subtracted in the secure-key accounting. Full privacy amplification (an actual universal-hash extractor, not just the leak-adjusted length) is still pending.
 - ⬜ GPU-accelerated density-matrix tracking for quantum-memory emulation (needed for entanglement-based protocols).
 
 ## Phase 2b — QKD security & post-processing depth ⬜
@@ -54,7 +54,7 @@ The prepare-and-measure QKD path produces correct QBER / sift / secure-fraction
 and for the security story a reviewer expects — are not yet built. Ordered by value:
 
 - ✅ **Adversary model — intercept-resend Eve.** `qne/eve.py`; taps a configurable fraction `f` of photons and is wired into the distributed BB84 path (`node_runner --eve-fraction f`). Verified end-to-end: sifted QBER ≈ 0.25·f and the secure fraction collapses to 0 past the ~11% threshold (f=1 → QBER ≈ 0.25). A beam-splitting / PNS Eve and an Eve-on-E91 variant are still open. → still pairs with an eavesdropper demo notebook (pending).
-- ⬜ **Reconciliation on the BB84 path.** `qne/cascade.py` is wired into E91 only; wire it into `qne/bob.py` + `qne-sequence` `distributed_qkd.py` (same parity-oracle pattern) so prepare-and-measure keys also match bit-for-bit.
+- ✅ **Reconciliation on the BB84 path.** Cascade now runs on the distributed BB84 path too (`node_runner`, via `qne-sequence/reconcile_link.py` — shared with E91): after the protocol's timeline finishes, Bob corrects his key toward Alice's over the same TCP link, and both report the identical key bit-for-bit. Gated on a positive secure fraction, so a run above the ~11% QBER threshold aborts instead of reconciling (verified with the intercept-resend Eve). The `qne/` raw-socket Bob (`bob.py`) is not yet wired.
 - ⬜ **Real privacy amplification.** Replace the asymptotic estimate with an actual extractor (Toeplitz / 2-universal hashing) that outputs the final secret key and a leak-adjusted length.
 - ⬜ **Finite-key security.** Report a finite-key secure length (Lim et al. / Tomamichel) alongside the asymptotic Shor–Preskill rate — the honest number for a run of N pulses, and it ties directly to "how long must we run over a real WAN."
 - ⬜ **Authenticated classical channel.** BB84's proof requires an *authenticated* classical channel; today it's plain TCP. Add a Wegman–Carter / HMAC tag on the sifting messages and account for the authentication-key cost — also a networking-overhead result (auth cost vs WAN RTT).
@@ -119,8 +119,7 @@ Priority order from the research plan:
 - The `qne/` hand-coded path models photons at the bit/basis level (no entanglement). Entanglement (E91/BBM92) lives in `qne-sequence/` on a shared multi-qubit **quantum-state service**, running distributed over 2 nodes; multi-hop entanglement swapping (repeater chains) is the next extension.
 - QBER comes from a depolarizing polarization-misalignment model (≈ (1−F)/2) plus dark counts; phase/timing error sources (`dead_time`, `timing_jitter`) are not yet modeled.
 - Adversary model available for the BB84 path (`qne/eve.py`, intercept-resend, `--eve-fraction`) — measured QBER then reflects channel noise **plus** eavesdropping. A beam-splitting / PNS Eve and an Eve-on-E91 path are still open (see Phase 2b).
-- **Security is asymptotic** (Shor–Preskill secure fraction): no finite-key bound, no real privacy-amplification extractor, and the classical channel is unauthenticated.
-- **BB84 keys are not yet reconciled** — Cascade runs on the E91 path only, so the prepare-and-measure path reports a secure-fraction *estimate* rather than a bit-for-bit matching secret key.
+- **Security is asymptotic** (Shor–Preskill secure fraction): no finite-key bound, no real privacy-amplification extractor, and the classical channel is unauthenticated. (Cascade reconciliation now runs on both the distributed BB84 and E91 paths — keys match bit-for-bit; the raw-socket `qne/bob.py` path is not yet wired.)
 - Memoryless per-packet loss — no burst loss or correlated fading.
 - Single wavelength, single link per run.
 - P4 and Python RNGs are independent — reproducibility holds within a backend, not bit-for-bit across the P4 and Python paths.
