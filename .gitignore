@@ -46,6 +46,12 @@ secrets/
 # Personal session tracking — never ship in the artifact
 cc-usage-log.md
 
+# Paper drafts + generated figures — kept local, regenerated via paper/make_figures.py
+paper/
+
+# Internal review notes — keep local, don't ship
+REVIEW_*.md
+
 # P4 build artifacts
 p4/bmv2/*.json
 p4/bmv2/**/*.json

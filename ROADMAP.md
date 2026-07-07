@@ -31,7 +31,7 @@ QFabric runs **BB84 QKD over a single emulated link**, end-to-end on a real FABR
 - ✅ Fiber loss as probabilistic drop, `P(loss) = 1 − 10^(−α·L/10)`, threshold-based.
 - ✅ Per-wavelength loss table; photon TX/drop counters.
 - ✅ Classical-traffic L2 forwarding (FABRIC OVS MAC workaround).
-- ✅ Sweep figures checked in (`paper/figures/`, via `paper/make_figures.py`) — QBER + key rate vs distance/attenuation. Validate measured drop rate vs analytical once a clean FABRIC sweep dataset is recorded.
+- ✅ Sweep figures generated locally via `paper/make_figures.py` (QBER + key rate vs distance/attenuation). `paper/` is git-ignored (drafts + regenerable figures), so re-run the script to produce them. Validate measured drop rate vs analytical once a clean FABRIC sweep dataset is recorded.
 - ⬜ **Timing jitter injection** in the data plane and validation against detector specs.
 - ⬜ **Throughput benchmark**: sustainable photon rate / P4 processing overhead.
 - ⬜ Port the model from BMv2 to **Tofino / DPDK SmartNIC** for finer timing control.
