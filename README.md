@@ -37,7 +37,7 @@ Alice (Python)  →  BMv2 P4 Switch  →  Bob (Python)
 | `p4/bmv2/` | BMv2 V1Model P4 quantum-channel program (loss model + L2 forwarding) |
 | `validation/` | Cross-validation framework — runs the same scenario on QFabric, SeQUeNCe, and NetSquid and checks statistical agreement |
 | `scripts/` | `deploy_fabric.py` (full FABRIC slice provisioning + run), `install_bmv2.sh`, `package_artifact.sh`, and the cross-validation env setup scripts |
-| `notebooks/` | Linear workflow: `00_overview` → `01_setup_slice` → `02_run_experiment` → `03_cross_validation` → `04_analysis` → `05_run_all_scenarios` → `06_network_effects` |
+| `notebooks/` | FABRIC workflow `00_overview` → … → `06_network_effects`, plus `07/08` (SeQUeNCe emulator), `09` (E91 entanglement), `10` (eavesdropper demo). See the reading-order tracks under Quick Start. |
 | `kiso/` | Kiso experiment config for FABRIC runs |
 | `docker/` | `Dockerfile.bmv2` (thin layer on `p4lang/p4c`); prebuilt image published to GHCR |
 | `paper/` | `make_figures.py` + `figures/` (QBER/key-rate sweep plots) |
@@ -59,8 +59,20 @@ The notebooks form a single linear workflow. Start at `00_overview`:
 | 4 | `04_analysis` | Load results and generate all plots & tables | Anywhere (ships sample results) |
 | 5 | `05_run_all_scenarios` | Run **every** scenario (singles + sweeps) on the slice + QBER/key-rate sweep figures | FABRIC JupyterHub |
 | 6 | `06_network_effects` | Quantify classical-network (latency/jitter/loss) impact on QKD throughput — the core contribution | FABRIC JupyterHub |
+| 7 | `07_sequence_emulator` | Distributed **SeQUeNCe** BB84 over the real P4 path (`0x7101` frames + TCP) | FABRIC JupyterHub |
+| 8 | `08_sequence_scenarios` | SeQUeNCe-emulator scenario sweeps | Anywhere (loopback) / FABRIC |
+| 9 | `09_entanglement_e91` | Entanglement-based QKD (**E91 / BBM92**) distributed over 2 nodes; CHSH Bell test | Anywhere (loopback) / FABRIC |
+| 10 | `10_eavesdropper` | Intercept-resend attack: QBER & secure-key-rate vs Eve's tap fraction, the ~11% threshold | Anywhere (local) |
 
-> Notebooks 1–2 provision and drive a FABRIC slice (BMv2 is installed on the switch node automatically). Notebooks 0, 3, 4 are pure-Python and run anywhere (including JupyterHub) — 4 works standalone on the bundled sample results.
+The numbers are the **FABRIC deployment order** (0→6 is the linear slice workflow). For
+learning or for slice-free work, read by track instead:
+
+- **Deploy on FABRIC:** 0 → 1 → 2 → 3 → 4 → 6
+- **Learn QKD (local, no slice):** 2 (BB84) → 10 (eavesdropper / why it's secure) → *decoy* (`scripts/decoy_sweep.py`; a notebook is a good first contribution) → *reconciliation* (planned)
+- **Simulator cross-checks:** 3, 7, 8
+- **Entanglement:** 9
+
+> Notebooks 1–2 provision and drive a FABRIC slice (BMv2 is installed on the switch node automatically). Notebooks 0, 4, 8, 9, 10 run **anywhere** (including a laptop) — 4 works standalone on bundled sample results; 8/9/10 run slice-free over loopback / in-process.
 
 ### Prerequisites
 
