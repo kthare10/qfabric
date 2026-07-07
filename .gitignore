@@ -52,6 +52,10 @@ paper/
 # Internal review notes — keep local, don't ship
 REVIEW_*.md
 
+# Intern-facing handouts — private, keep local
+ASSIGNMENT_*.md
+EXPLORATION.md
+
 # P4 build artifacts
 p4/bmv2/*.json
 p4/bmv2/**/*.json
