@@ -63,12 +63,13 @@ The notebooks form a single linear workflow. Start at `00_overview`:
 | 8 | `08_sequence_scenarios` | SeQUeNCe-emulator scenario sweeps | Anywhere (loopback) / FABRIC |
 | 9 | `09_entanglement_e91` | Entanglement-based QKD (**E91 / BBM92**) distributed over 2 nodes; CHSH Bell test | Anywhere (loopback) / FABRIC |
 | 10 | `10_eavesdropper` | Intercept-resend attack: QBER & secure-key-rate vs Eve's tap fraction, the ~11% threshold | Anywhere (local) |
+| 11 | `11_reconciliation` | Cascade reconciliation: raw keys → identical secret key; leakage & the abort-above-threshold behavior | Anywhere (loopback) |
 
 The numbers are the **FABRIC deployment order** (0→6 is the linear slice workflow). For
 learning or for slice-free work, read by track instead:
 
 - **Deploy on FABRIC:** 0 → 1 → 2 → 3 → 4 → 6
-- **Learn QKD (local, no slice):** 2 (BB84) → 10 (eavesdropper / why it's secure) → *decoy* (`scripts/decoy_sweep.py`; a notebook is a good first contribution) → *reconciliation* (planned)
+- **Learn QKD (local, no slice):** 2 (BB84) → 10 (eavesdropper / why it's secure) → 11 (reconciliation → a real shared key) → *decoy* (`scripts/decoy_sweep.py`; a notebook is a good first contribution)
 - **Simulator cross-checks:** 3, 7, 8
 - **Entanglement:** 9
 
