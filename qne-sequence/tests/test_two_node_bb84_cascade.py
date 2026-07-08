@@ -49,7 +49,8 @@ def test_cascade_makes_bb84_keys_match():
     assert a["reconciled"] and b["reconciled"]
     assert a["key"] == b["key"]                  # corrected bit-for-bit
     assert a["corrections"] > 0 and a["bits_leaked"] > 0
-    assert a["secure_key_bits"] > 0
+    # privacy amplification extracts a shorter secret than the reconciled key
+    assert 0 < a["secure_key_bits"] < a["key_bits"]
 
 
 def test_no_reconcile_leaves_bb84_errors():

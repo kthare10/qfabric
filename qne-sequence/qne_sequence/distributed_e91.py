@@ -23,7 +23,7 @@ import numpy as np
 from qne.bb84 import BB84Protocol
 from .quantum_state_service import QuantumStateService
 from .remote_qm import RpcChannel, RemoteQuantumManager
-from .reconcile_link import bits_to_int, drive_cascade, secure_key_bits, serve_parities
+from .reconcile_link import bits_to_int, drive_cascade, serve_parities
 from .e91 import _ANGLE, _MODES, _CHSH, chsh_value
 from .listener import Link
 
@@ -124,15 +124,18 @@ def _run_alice(rpc, spec, key_codes, num_pairs, fidelity, loss_probability,
     # key bits (in the shared key_only order) until Bob signals done.
     reconciled = False
     corrections = bits_leaked = 0
+    secure_len = 0
     if do_reconcile and key_only and secure_fraction > 0:   # abort above ~11% QBER
-        reconciled, corrections, bits_leaked = serve_parities(
+        final, corrections, bits_leaked = serve_parities(
             rpc, [a_bits[i] for i in key_only])
+        alice_key = bits_to_int(final)                       # extracted secret key
+        secure_len = len(final)
+        reconciled = True
 
     return {"key": alice_key, "detected_pairs": int(sum(surviving)),
             "num_pairs": num_pairs, "reconciled": reconciled,
             "corrections": corrections, "bits_leaked": bits_leaked,
-            "secure_key_bits": secure_key_bits(
-                len(key_only), summary["qber"], bits_leaked, reconciled),
+            "secure_key_bits": secure_len,
             **summary}
 
 
@@ -181,18 +184,19 @@ def _run_bob(rpc, spec, key_codes, num_pairs, mode, sample_fraction, seed,
     key_only = [i for i in key_pos if i not in sample_set]
     key_arr = [b_bits[i] for i in key_only]
 
-    # Cascade reconciliation: correct Bob's key toward Alice's over the wire.
+    # Cascade reconciliation + privacy amplification over the wire.
     reconciled = False
     corrections = bits_leaked = 0
+    secure_len = 0
     if do_reconcile and key_only and summary["secure_fraction"] > 0:  # abort above ~11% QBER
         key_arr, corrections, bits_leaked = drive_cascade(
             rpc, key_arr, summary["qber"], seed + 303, passes=cascade_passes)
+        secure_len = len(key_arr)
         reconciled = True
 
     bob_key = bits_to_int(key_arr)
     return {"key": bob_key, "detected_pairs": int(sum(surviving)),
             "num_pairs": num_pairs, "reconciled": reconciled,
             "corrections": corrections, "bits_leaked": bits_leaked,
-            "secure_key_bits": secure_key_bits(
-                len(key_only), summary["qber"], bits_leaked, reconciled),
+            "secure_key_bits": secure_len,
             **summary}

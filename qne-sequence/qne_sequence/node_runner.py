@@ -151,32 +151,34 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
     if raw_rx is not None:
         raw_rx.stop()
 
-    # Cascade reconciliation over the (now idle) TCP link: Bob corrects his key
-    # toward Alice's bit-for-bit. Both sides hold key_bits in the same key_order;
-    # we swap the link into synchronous RPC mode now that the timeline has stopped.
+    # Post-processing over the (now idle) TCP link: Cascade reconciliation then
+    # privacy amplification. Both sides hold key_bits in the same key_order; we swap
+    # the link into synchronous RPC mode now that the timeline has stopped.
     from .remote_qm import RpcChannel
-    from .reconcile_link import bits_to_int, drive_cascade, secure_key_bits, serve_parities
+    from .reconcile_link import bits_to_int, drive_cascade, serve_parities
 
     reconciled = False
     corrections = bits_leaked = 0
-    key_bits = list(getattr(dbb, "key_bits", None) or [])   # aligned key on both sides
+    sift_key = list(getattr(dbb, "key_bits", None) or [])   # aligned key on both sides
+    final_key = sift_key                                    # unamplified fallback
     qber = dbb.metrics.get("qber", 0.0)
     # Above the ~11% threshold there's no secure key, so abort rather than waste
     # effort reconciling. Both sides see the same QBER, so they agree (no deadlock).
     secure_ok = dbb.metrics.get("secure_fraction", 0.0) > 0
-    if do_reconcile and key_bits and secure_ok:
+    if do_reconcile and sift_key and secure_ok:
         rpc = RpcChannel(link)   # rebinds link.on_frame to a buffered queue
-        if role == 1:            # Bob drives; his key gets corrected toward Alice's
-            key_bits, corrections, bits_leaked = drive_cascade(
-                rpc, key_bits, qber, seed + 303, passes=cascade_passes)
-            reconciled = True
-        else:                    # Alice answers parity queries over her key
-            reconciled, corrections, bits_leaked = serve_parities(rpc, key_bits)
+        if role == 1:            # Bob drives Cascade + announces the PA hash
+            final_key, corrections, bits_leaked = drive_cascade(
+                rpc, sift_key, qber, seed + 303, passes=cascade_passes)
+        else:                    # Alice answers parities, then applies the same PA hash
+            final_key, corrections, bits_leaked = serve_parities(rpc, sift_key)
+        reconciled = True
 
     link.close()
 
-    # Report the full aligned key (both sides) — reconciled → identical bit-for-bit.
-    reconciled_key = bits_to_int(key_bits) if key_bits else result.get("key")
+    # Report the extracted secret key — reconciled+amplified → identical bit-for-bit.
+    reconciled_key = bits_to_int(final_key) if final_key else result.get("key")
+    secure_key_len = len(final_key) if reconciled else 0
     return {
         "role": role,
         "name": name,
@@ -192,7 +194,7 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         "reconciled": reconciled,
         "corrections": corrections,
         "bits_leaked": bits_leaked,
-        "secure_key_bits": secure_key_bits(len(key_bits), qber, bits_leaked, reconciled),
+        "secure_key_bits": secure_key_len,
         "photon_mode": result.get("photon_mode", photon_mode),
         "photons_emitted": result.get("photons_emitted"),
         "elapsed_s": result.get("elapsed_s"),

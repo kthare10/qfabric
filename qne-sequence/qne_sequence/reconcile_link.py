@@ -17,6 +17,7 @@ from operator import xor
 
 from qne.bb84 import BB84Protocol
 from qne.cascade import reconcile
+from qne.privacy import toeplitz_amplify
 
 
 def bits_to_int(bits) -> int | None:
@@ -39,9 +40,10 @@ def secure_key_bits(key_bits: int, qber: float, bits_leaked: int, reconciled: bo
 
 
 def serve_parities(rpc, key_bits):
-    """Alice side: answer parity queries over ``key_bits`` until Bob signals done.
+    """Alice side: answer parity queries over ``key_bits`` until Bob signals done,
+    then apply the same privacy-amplification hash Bob announced.
 
-    Returns (reconciled, corrections, bits_leaked) reported by Bob.
+    Returns (final_key_bits, corrections, bits_leaked) — the extracted secret key.
     """
     while True:
         kind, body = rpc.recv_any()
@@ -50,15 +52,18 @@ def serve_parities(rpc, key_bits):
                         for blk in body["blocks"]]
             rpc.send("PARITY_RESP", {"parities": parities})
         elif kind == "RECONCILE_DONE":
-            return True, body["corrections"], body["bits_leaked"]
+            final = toeplitz_amplify(key_bits, body["out_len"], body["pa_seed"])
+            return final, body["corrections"], body["bits_leaked"]
         else:
             raise ValueError(f"unexpected frame during reconciliation: {kind}")
 
 
 def drive_cascade(rpc, key_bits, qber, seed, passes=4):
-    """Bob side: correct ``key_bits`` toward Alice's via Cascade over the link.
+    """Bob side: reconcile ``key_bits`` toward Alice's via Cascade, then privacy-
+    amplify to the secure length. Announces the (public) hash seed + output length
+    so Alice extracts the identical secret.
 
-    Returns (corrected_key_bits, corrections, bits_leaked).
+    Returns (final_key_bits, corrections, bits_leaked) — the extracted secret key.
     """
     def parity_oracle(blocks):
         resp = rpc.call("PARITY_REQ",
@@ -69,6 +74,10 @@ def drive_cascade(rpc, key_bits, qber, seed, passes=4):
     # floor QBER so a sample that missed all errors doesn't collapse block sizing
     res = reconcile(list(key_bits), parity_oracle, max(qber, 1.0 / (2 * len(key_bits))),
                     passes=passes, seed=seed)
+    out_len = secure_key_bits(len(res.corrected_key), qber, res.bits_leaked, True)
+    pa_seed = seed + 111
+    final = toeplitz_amplify(res.corrected_key, out_len, pa_seed)
     rpc.send("RECONCILE_DONE", {"corrections": res.corrections,
-                                "bits_leaked": res.bits_leaked})
-    return res.corrected_key, res.corrections, res.bits_leaked
+                                "bits_leaked": res.bits_leaked,
+                                "out_len": out_len, "pa_seed": pa_seed})
+    return final, res.corrections, res.bits_leaked
