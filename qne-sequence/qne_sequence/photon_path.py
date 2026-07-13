@@ -39,8 +39,8 @@ class BulkStream(PhotonEmissionStrategy):
     name = "bulk"
 
     def emit(self, protocol, basis_list, bit_list) -> None:
-        n = len(basis_list)
-        pulses = [[i, int(basis_list[i]), int(bit_list[i])] for i in range(n)]
+        # the protocol builds the descriptors (decoy mode appends a photon count)
+        pulses = protocol.make_pulses(basis_list, bit_list)
         protocol.owner.qchannels[protocol.peer_node].transmit_batch(
             protocol.owner.name, protocol.peer_proto, pulses)
         protocol.send_quantum_done()

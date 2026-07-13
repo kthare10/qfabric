@@ -67,7 +67,7 @@ class DistributedBB84(BB84):
                  seed: int = 0, on_key=None, detector=None,
                  sample_fraction: float = 0.1, num_pulses: int | None = None,
                  photon_mode: str = "bulk", photon_drain_ps: int = 0,
-                 eavesdropper=None):
+                 eavesdropper=None, basis_bias: float = 0.5, decoy=None):
         super().__init__(owner, name, lightsource, qsdetector, role)
         # QKDNode.receive_message (sequence 1.0.0) routes to the first protocol whose
         # protocol_type is truthy; the base Protocol leaves it "" (falsy). Set it so
@@ -77,6 +77,22 @@ class DistributedBB84(BB84):
         self.on_key = on_key            # callback(role, info_dict) when a key completes
         self.detector = detector        # qne.detector.Detector (Bob); None on Alice
         self.eavesdropper = eavesdropper  # qne.eve.InterceptResendEve on the channel; None = no Eve
+        # P(Z basis). 0.5 = standard BB84. Biased (efficient BB84): key from Z–Z
+        # matches, ALL X–X matches disclosed for phase-error estimation.
+        self.basis_bias = basis_bias
+        # Decoy-state source (weak-coherent, PNS-resilient): dict with
+        # "intensities" {signal,decoy,vacuum -> mu}, "probs" [P(s),P(d),P(v)],
+        # "loss_probability" (folded into per-photon binomial thinning here, so
+        # the channel itself must be lossless), and optional "f_ec".
+        # Key material comes from SIGNAL pulses only; decoy-class matches are
+        # fully disclosed to measure E_decoy; gains come from Bob's detected set.
+        self.decoy = decoy
+        if decoy is not None:
+            if basis_bias != 0.5:
+                raise ValueError("decoy mode does not compose with --basis-bias")
+            if photon_mode != "bulk":
+                raise ValueError("decoy mode requires photon_mode='bulk'")
+        self._decoy_classes: list[int] = []          # per-pulse 0=signal/1=decoy/2=vacuum
         self.sample_fraction = sample_fraction
         self.num_pulses_override = num_pulses
         self.photon_mode = photon_mode
@@ -91,6 +107,7 @@ class DistributedBB84(BB84):
         self._bob_key_order: list[int] = []
         self._bob_sifted_count = 0
         self._bob_num_sampled = 0
+        self._bob_detected = 0
         # raw mode head race: photons (P4 path) can arrive BEFORE the TCP
         # BEGIN_PHOTON_PULSE that resets _bob_records; buffer them here and
         # replay after BEGIN instead of silently wiping the head of the train.
@@ -163,12 +180,35 @@ class DistributedBB84(BB84):
             return
         num_pulses = self.num_pulses_override or round(self.light_time * self.ls_freq)
         self._num_pulses = num_pulses
-        basis_list = self.rng.integers(0, 2, num_pulses)
+        # P(Z) = basis_bias; 0.5 reproduces the unbiased integers(0, 2) draw
+        basis_list = (self.rng.random(num_pulses) >= self.basis_bias).astype(int)
         bit_list = self.rng.integers(0, 2, num_pulses)
         self.basis_lists.append(basis_list)
         self.bit_lists.append(bit_list)
         # delegate transport granularity to the selected strategy (DESIGN §4.3)
         self.strategy.emit(self, basis_list, bit_list)
+
+    def make_pulses(self, basis_list, bit_list) -> list:
+        """Build the wire descriptors for one pulse train (BulkStream hook).
+
+        Standard mode: [seq, basis, bit]. Decoy mode: [seq, basis, bit, n] where
+        n is the photon count that SURVIVES the fiber — the source draws
+        Poisson(μ_class) photons and the channel thins them Binomial(n, 1−loss).
+        Every pulse ships (even n = 0): an empty slot can still dark-count.
+        """
+        num = len(basis_list)
+        if self.decoy is None:
+            return [[i, int(basis_list[i]), int(bit_list[i])] for i in range(num)]
+        mus = self.decoy["intensities"]
+        mu_by_class = (mus["signal"], mus["decoy"], mus["vacuum"])
+        probs = self.decoy["probs"]
+        p_loss = self.decoy.get("loss_probability", 0.0)
+        classes = self.rng.choice(3, size=num, p=probs)
+        self._decoy_classes = [int(c) for c in classes]
+        n_photons = self.rng.poisson([mu_by_class[c] for c in classes])
+        n_arriving = self.rng.binomial(n_photons, 1.0 - p_loss)
+        return [[i, int(basis_list[i]), int(bit_list[i]), int(n_arriving[i])]
+                for i in range(num)]
 
     def emit_one_photon(self, seq: int, basis: int, bit: int) -> None:
         """PerPhotonEvent: transmit a single photon (one Event, one frame)."""
@@ -203,10 +243,13 @@ class DistributedBB84(BB84):
         # sifting, so a wrong-basis interception surfaces as a bit error.
         if self.eavesdropper is not None:
             pulses = self.eavesdropper.intercept_pulses(pulses)
-        for seq, a_basis, a_bit in pulses:
+        for seq, a_basis, a_bit, *rest in pulses:
             photon = types.SimpleNamespace(basis=int(a_basis), state=int(a_bit),
                                            sequence_num=int(seq))
-            ev = self.detector.detect(photon)
+            if rest:                      # decoy descriptor: surviving photon count
+                ev = self.detector.detect_pulse(photon, int(rest[0]))
+            else:
+                ev = self.detector.detect(photon)
             if ev.detected:
                 self._bob_records[int(seq)] = (int(ev.basis), int(ev.bit_value))
 
@@ -246,7 +289,11 @@ class DistributedBB84(BB84):
 
         elif t == "RECEIVED_QUBITS":             # current node is Alice
             bases = self.basis_lists[0]
-            self._send("BASIS_LIST", {"bases": [int(x) for x in bases]})
+            payload = {"bases": [int(x) for x in bases]}
+            if self.decoy is not None:
+                # intensity labels are public AFTER Bob's detections are locked in
+                payload["intensity"] = self._decoy_classes
+            self._send("BASIS_LIST", payload)
 
         elif t == "BASIS_LIST":                  # current node is Bob: sift + sample
             alice_bases = msg.payload["bases"]
@@ -254,21 +301,45 @@ class DistributedBB84(BB84):
                 seq for seq, (bb, _bit) in self._bob_records.items()
                 if seq < len(alice_bases) and bb == alice_bases[seq]
             )
-            # choose a random disclosure sample for QBER estimation
-            # (sampling policy shared with qne.bb84.BB84Protocol)
-            n_sample = BB84Protocol.sample_size(len(matching), self.sample_fraction)
-            sample = sorted(self.rng.choice(matching, size=n_sample, replace=False).tolist()) \
-                if n_sample else []
+            self._bob_detected = len(self._bob_records)
+            decoy_extra = {}
+            classes = msg.payload.get("intensity")
+            if classes is not None:
+                # decoy mode: key from SIGNAL pulses only; decoy-class matches are
+                # fully disclosed (E_decoy); every detection feeds the gain stats
+                decoy_matched = [s for s in matching if classes[s] == 1]
+                matching = [s for s in matching if classes[s] == 0]
+                decoy_extra = {
+                    "detected_sequences": sorted(self._bob_records),
+                    "decoy_indices": decoy_matched,
+                    "decoy_bits": [self._bob_records[s][1] for s in decoy_matched],
+                }
+            if self.basis_bias != 0.5:
+                # efficient BB84: key from Z–Z matches; disclose ALL X–X matches
+                # (phase-error estimate) + a sample of Z–Z (bit-error estimate)
+                matching_z = [s for s in matching if self._bob_records[s][0] == 0]
+                matching_x = [s for s in matching if self._bob_records[s][0] == 1]
+                n_sample = BB84Protocol.sample_size(len(matching_z), self.sample_fraction)
+                z_sample = sorted(self.rng.choice(
+                    matching_z, size=n_sample, replace=False).tolist()) if n_sample else []
+                sample = sorted(matching_x + z_sample)
+            else:
+                # choose a random disclosure sample for QBER estimation
+                # (sampling policy shared with qne.bb84.BB84Protocol)
+                n_sample = BB84Protocol.sample_size(len(matching), self.sample_fraction)
+                sample = sorted(self.rng.choice(matching, size=n_sample, replace=False).tolist()) \
+                    if n_sample else []
             sample_set = set(sample)
             self._bob_key_order = [s for s in matching if s not in sample_set]
             # keep the full sifted count so Bob's result reports the same
             # semantics as Alice's (sifted_bits = matches, key_bits = remainder)
             self._bob_sifted_count = len(matching)
-            self._bob_num_sampled = n_sample
+            self._bob_num_sampled = len(sample)
             self._send("SIFTED", {
                 "matching_indices": matching,
                 "sample_indices": sample,
                 "bob_sample_bits": [self._bob_records[s][1] for s in sample],
+                **decoy_extra,
             })
 
         elif t == "SIFTED":                      # current node is Alice: QBER + key
@@ -279,13 +350,33 @@ class DistributedBB84(BB84):
 
             # QBER from the disclosed sample (replaces self.key ^ self.another.key);
             # error counting + Wilson CI shared with qne.bb84.BB84Protocol
-            qber_est = BB84Protocol.qber_from_disclosed(
-                [int(alice_bits[s]) for s in sample],
-                [int(b) for b in bob_sample_bits],
-            )
-            qber = qber_est.qber
+            a_sample = [int(alice_bits[s]) for s in sample]
+            b_sample = [int(b) for b in bob_sample_bits]
+            qber_est = BB84Protocol.qber_from_disclosed(a_sample, b_sample)
             errors = qber_est.num_errors
             num_sampled = qber_est.num_sampled
+
+            qber_x = None
+            if self.basis_bias != 0.5:
+                # efficient BB84: split the disclosed positions by Alice's basis —
+                # Z sample = bit-error estimate, X matches = phase-error estimate
+                bases = self.basis_lists[0]
+                zi = [i for i, s in enumerate(sample) if int(bases[s]) == 0]
+                xi = [i for i, s in enumerate(sample) if int(bases[s]) == 1]
+                qz = BB84Protocol.qber_from_disclosed(
+                    [a_sample[i] for i in zi], [b_sample[i] for i in zi])
+                qx = BB84Protocol.qber_from_disclosed(
+                    [a_sample[i] for i in xi], [b_sample[i] for i in xi])
+                if qz.num_sampled and qx.num_sampled:
+                    secure_fraction = BB84Protocol.efficient_secure_fraction(
+                        qz.qber, qx.qber)
+                else:
+                    secure_fraction = 0.0     # unestimated phase error = no security
+                qber = qz.qber                # the key (Z) error rate — sizes Cascade
+                qber_x = qx.qber
+            else:
+                qber = qber_est.qber
+                secure_fraction = BB84Protocol.secure_key_fraction(qber)
 
             sample_set = set(sample)
             key_order = [s for s in matching if s not in sample_set]
@@ -298,12 +389,13 @@ class DistributedBB84(BB84):
                 self.final_keys.append(self.key)
                 key_int = self.key
 
-            secure_fraction = BB84Protocol.secure_key_fraction(qber)
             final_key_bits = int(len(key_order) * secure_fraction)
             elapsed_s = (time_ns() - self._t_start_ns) / 1e9
             self.metrics = {
                 "qber": qber, "num_sampled": num_sampled, "num_errors": errors,
                 "qber_ci": list(qber_est.confidence_interval),
+                "qber_disclosed": qber_est.qber, "qber_x": qber_x,
+                "basis_bias": self.basis_bias,
                 "sifted_bits": len(matching), "key_bits": len(key_order),
                 "secure_fraction": secure_fraction,
                 "final_key_bits": final_key_bits,
@@ -312,7 +404,44 @@ class DistributedBB84(BB84):
                 "photons_per_s": (self._num_pulses / elapsed_s) if elapsed_s > 0 else None,
             }
 
-            self._send("QBER_RESULT", {"qber": qber})
+            # Decoy-state analysis on the LIVE statistics: measured per-intensity
+            # gains (from Bob's full detection set) + measured E_signal/E_decoy
+            # feed the Lo–Ma–Chen bounds -> GLLP rate (qne/decoy.py, unchanged).
+            decoy_summary = None
+            if self.decoy is not None and "detected_sequences" in msg.payload:
+                from qne.decoy import decoy_state_key_rate
+                labels = ("signal", "decoy", "vacuum")
+                classes = self._decoy_classes
+                sent = [0, 0, 0]
+                for c in classes:
+                    sent[c] += 1
+                det = [0, 0, 0]
+                for s in msg.payload["detected_sequences"]:
+                    det[classes[s]] += 1
+                gains = {lab: (det[i] / sent[i] if sent[i] else 0.0)
+                         for i, lab in enumerate(labels)}
+                e_d = BB84Protocol.qber_from_disclosed(
+                    [int(alice_bits[s]) for s in msg.payload["decoy_indices"]],
+                    [int(b) for b in msg.payload["decoy_bits"]])
+                res = decoy_state_key_rate(
+                    gains, {"signal": qber, "decoy": e_d.qber},
+                    self.decoy["intensities"], f_ec=self.decoy.get("f_ec", 1.16))
+                decoy_summary = {
+                    "gains": gains,
+                    "sent": dict(zip(labels, sent)),
+                    "detected": dict(zip(labels, det)),
+                    "qber_signal": qber, "qber_decoy": e_d.qber,
+                    "Y1_lower": res["Y1_lower"], "e1_upper": res["e1_upper"],
+                    "Q1": res["Q1"], "Y0": res["Y0"],
+                    "secure_key_rate": res["secure_key_rate"],
+                    # per-pulse GLLP rate x pulses sent = decoy-secure key budget
+                    "decoy_key_bits": int(res["secure_key_rate"] * self._num_pulses),
+                }
+                self.metrics["decoy"] = decoy_summary
+
+            self._send("QBER_RESULT", {"qber": qber, "qber_x": qber_x,
+                                       "secure_fraction": secure_fraction,
+                                       "decoy": decoy_summary})
             self.keys_left_list[0] -= 1
             self.working = False
             if self.on_key:
@@ -329,13 +458,22 @@ class DistributedBB84(BB84):
                 key_int = self.key
             # Bob now knows QBER too — report the same secure metrics as Alice
             # so both result rows are complete (symmetric for sweeps/plots).
-            secure_fraction = BB84Protocol.secure_key_fraction(qber)
+            # Alice already folded the biased-basis math into secure_fraction.
+            secure_fraction = msg.payload.get(
+                "secure_fraction", BB84Protocol.secure_key_fraction(qber))
+            detected = getattr(self, "_bob_detected", 0)
             self.metrics = {"qber": qber,
+                            "qber_x": msg.payload.get("qber_x"),
+                            "basis_bias": self.basis_bias,
                             "sifted_bits": self._bob_sifted_count,
+                            "detected_pulses": detected,
+                            "sift_ratio": (self._bob_sifted_count / detected
+                                           if detected else None),
                             "num_sampled": self._bob_num_sampled,
                             "key_bits": len(self._bob_key_order),
                             "secure_fraction": secure_fraction,
-                            "final_key_bits": int(len(self._bob_key_order) * secure_fraction)}
+                            "final_key_bits": int(len(self._bob_key_order) * secure_fraction),
+                            "decoy": msg.payload.get("decoy")}
             if self.eavesdropper is not None:
                 self.metrics.update(self.eavesdropper.stats)
             self.working = False

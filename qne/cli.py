@@ -60,6 +60,10 @@ def create_parser() -> argparse.ArgumentParser:
         help="Source MAC for photon frames (colon-separated hex)",
     )
     alice_parser.add_argument(
+        "--auth-key", default=None,
+        help="pre-shared key: HMAC-authenticate the classical channel",
+    )
+    alice_parser.add_argument(
         "--output", "-o", help="Output JSON file for metrics"
     )
 
@@ -76,6 +80,14 @@ def create_parser() -> argparse.ArgumentParser:
     )
     bob_parser.add_argument(
         "--port", type=int, default=5100, help="Classical channel listen port"
+    )
+    bob_parser.add_argument(
+        "--auth-key", default=None,
+        help="pre-shared key: HMAC-authenticate the classical channel",
+    )
+    bob_parser.add_argument(
+        "--no-reconcile", dest="reconcile", action="store_false",
+        help="skip Cascade error reconciliation + privacy amplification",
     )
     bob_parser.add_argument(
         "--output", "-o", help="Output JSON file for metrics"
@@ -117,6 +129,7 @@ def _run_alice(args: argparse.Namespace) -> None:
         bob_port=args.bob_port,
         dst_mac=_mac_str_to_bytes(getattr(args, "dst_mac", None)),
         src_mac=_mac_str_to_bytes(getattr(args, "src_mac", None)),
+        auth_key=args.auth_key,
     )
     metrics = alice.run()
     if args.output:
@@ -133,6 +146,8 @@ def _run_bob(args: argparse.Namespace) -> None:
         interface=args.interface,
         classical_host=args.host,
         classical_port=args.port,
+        auth_key=args.auth_key,
+        reconcile=getattr(args, "reconcile", True),
     )
     metrics = bob.run()
     if args.output:

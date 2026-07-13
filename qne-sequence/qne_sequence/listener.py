@@ -20,6 +20,8 @@ from time import sleep
 from sequence.kernel.event import Event
 from sequence.kernel.process import Process
 
+from qne.auth import AuthError, FrameAuthenticator
+
 from .wire_codec import WireCodec
 
 _LEN = struct.Struct("!I")
@@ -31,10 +33,17 @@ class Link:
     One side calls ``serve`` (listen + accept one peer), the other ``connect``
     (with retry). After the connection is up, ``send`` is full-duplex and the RX
     thread invokes ``on_frame(bytes)`` for each inbound frame.
+
+    With ``auth_key`` set, every frame carries an HMAC tag + sequence number
+    (qne/auth.py). A frame that fails verification tears the connection down
+    (like TLS): the RX loop stops, ``auth_failures`` is incremented, and no
+    payload is delivered — the run then aborts on its timeouts rather than
+    proceeding with attacker-controlled sifting traffic.
     """
 
-    def __init__(self, on_frame=None):
+    def __init__(self, on_frame=None, auth_key: bytes | str | None = None):
         self.on_frame = on_frame
+        self._auth = FrameAuthenticator(auth_key) if auth_key else None
         self._sock: socket.socket | None = None
         self._listen_sock: socket.socket | None = None
         self._rx_thread: threading.Thread | None = None
@@ -42,6 +51,7 @@ class Link:
         self._send_lock = threading.Lock()
         self.tx_count = 0
         self.rx_count = 0
+        self.auth_failures = 0
 
     def serve(self, host: str, port: int, timeout: float = 30.0) -> None:
         ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -94,12 +104,23 @@ class Link:
             payload = self._recv_exact(length)
             if payload is None:
                 break
+            if self._auth is not None:
+                try:
+                    payload = self._auth.open(payload)
+                except AuthError as exc:
+                    self.auth_failures += 1
+                    print(f"Link: authentication failure, closing: {exc}",
+                          flush=True)
+                    self.close()
+                    break
             self.rx_count += 1
             if self.on_frame is not None:
                 self.on_frame(payload)
 
     def send(self, payload: bytes) -> None:
         with self._send_lock:
+            if self._auth is not None:
+                payload = self._auth.seal(payload)
             self._sock.sendall(_LEN.pack(len(payload)) + payload)
             self.tx_count += 1
 

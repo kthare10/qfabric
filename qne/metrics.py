@@ -40,6 +40,10 @@ class ExperimentMetrics:
     raw_key_rate: float = 0.0
     secure_key_rate: float = 0.0
     final_key_bits: int = 0
+    reconciled: bool = False
+    corrections: int = 0
+    bits_leaked: int = 0
+    secure_key_bits: int = 0     # extracted secret length after Cascade + PA
     elapsed_seconds: float = 0.0
     start_time: Optional[str] = None
     end_time: Optional[str] = None
@@ -123,6 +127,15 @@ class MetricsCollector:
         self.metrics.raw_key_rate = raw_rate
         self.metrics.secure_key_rate = secure_rate
         self.metrics.final_key_bits = final_bits
+
+    def set_reconciliation(
+        self, reconciled: bool, corrections: int, bits_leaked: int,
+        secure_key_bits: int,
+    ) -> None:
+        self.metrics.reconciled = reconciled
+        self.metrics.corrections = corrections
+        self.metrics.bits_leaked = bits_leaked
+        self.metrics.secure_key_bits = secure_key_bits
 
     def set_config(self, config: dict[str, Any]) -> None:
         self.metrics.config = config

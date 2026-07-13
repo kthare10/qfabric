@@ -202,6 +202,20 @@ class BB84Protocol:
             return max(0.0, 1.0 - 2.0 * BB84Protocol.binary_entropy(qber))
         return 0.0
 
+    @staticmethod
+    def efficient_secure_fraction(qber_z: float, qber_x: float) -> float:
+        """Efficient-BB84 asymptotic fraction: 1 - H(e_bit) - H(e_phase).
+
+        With biased bases the key comes from Z–Z matches (bit error e_z) while the
+        X–X matches are disclosed to estimate the phase error e_x. For unbiased
+        BB84 (e_z = e_x = Q) this reduces to Shor–Preskill's 1 - 2·H(Q), including
+        the ~11% cutoff (where the expression crosses zero).
+        """
+        if not (0.0 <= qber_z < 0.5 and 0.0 <= qber_x < 0.5):
+            return 0.0
+        h = BB84Protocol.binary_entropy
+        return max(0.0, 1.0 - h(qber_z) - h(qber_x))
+
     def compute_key_rate(
         self,
         sifted: SiftingResult,

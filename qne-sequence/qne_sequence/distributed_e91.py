@@ -39,11 +39,14 @@ def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
                  num_pairs: int = 20000, fidelity: float = 0.98,
                  loss_probability: float = 0.0, mode: str = "e91",
                  sample_fraction: float = 0.1, seed: int = 0,
-                 do_reconcile: bool = True, cascade_passes: int = 4) -> dict:
+                 do_reconcile: bool = True, cascade_passes: int = 4,
+                 finite_key: bool = False, eps_sec: float = 1e-9,
+                 eps_cor: float = 1e-15, auth_key: str | None = None) -> dict:
     """Run one side of a distributed E91/BBM92 session; return the result dict."""
     spec = _MODES[mode]
     key_codes = set(spec["key"])
-    link = Link()
+    fk_eps = {"eps_sec": eps_sec, "eps_cor": eps_cor} if finite_key else None
+    link = Link(auth_key=auth_key)
     if role == 1:                       # Bob listens; Alice connects (as in BB84)
         link.serve(host, port)
     else:
@@ -55,21 +58,24 @@ def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
         if role == 0:
             result = _run_alice(rpc, spec, key_codes, num_pairs, fidelity,
                                 loss_probability, mode, sample_fraction, seed,
-                                do_reconcile)
+                                do_reconcile, fk_eps)
         else:
             result = _run_bob(rpc, spec, key_codes, num_pairs, mode,
-                              sample_fraction, seed, do_reconcile, cascade_passes)
+                              sample_fraction, seed, do_reconcile, cascade_passes,
+                              fk_eps)
     finally:
         link.close()
 
     result.update({"role": role, "name": name, "mode": mode,
                    "quantum_transport": "entangled-state-service",
-                   "tx_frames": link.tx_count, "rx_frames": link.rx_count})
+                   "tx_frames": link.tx_count, "rx_frames": link.rx_count,
+                   "authenticated": auth_key is not None,
+                   "auth_failures": link.auth_failures})
     return result
 
 
 def _run_alice(rpc, spec, key_codes, num_pairs, fidelity, loss_probability,
-               mode, sample_fraction, seed, do_reconcile):
+               mode, sample_fraction, seed, do_reconcile, fk_eps=None):
     svc = QuantumStateService(seed=seed)
     a_rng = np.random.default_rng(seed + 101)
     pairs = svc.create_pairs(num_pairs, fidelity=fidelity,
@@ -132,15 +138,24 @@ def _run_alice(rpc, spec, key_codes, num_pairs, fidelity, loss_probability,
         secure_len = len(final)
         reconciled = True
 
+    finite_info = None
+    if fk_eps is not None and reconciled:
+        from qne.finite_key import finite_key_length
+        fk = finite_key_length(len(key_only), qest.num_sampled, qest.qber,
+                               bits_leaked, **fk_eps)
+        finite_info = {"secret_bits": fk.secret_bits,
+                       "asymptotic_bits": fk.asymptotic_bits,
+                       "qber_upper": fk.qber_upper, "mu": fk.mu, **fk_eps}
+
     return {"key": alice_key, "detected_pairs": int(sum(surviving)),
             "num_pairs": num_pairs, "reconciled": reconciled,
             "corrections": corrections, "bits_leaked": bits_leaked,
-            "secure_key_bits": secure_len,
+            "secure_key_bits": secure_len, "finite_key": finite_info,
             **summary}
 
 
 def _run_bob(rpc, spec, key_codes, num_pairs, mode, sample_fraction, seed,
-             do_reconcile, cascade_passes):
+             do_reconcile, cascade_passes, fk_eps=None):
     qm = RemoteQuantumManager(rpc)
     b_rng = np.random.default_rng(seed + 202)
 
@@ -188,15 +203,28 @@ def _run_bob(rpc, spec, key_codes, num_pairs, mode, sample_fraction, seed,
     reconciled = False
     corrections = bits_leaked = 0
     secure_len = 0
+    n_key_in = len(key_arr)
     if do_reconcile and key_only and summary["secure_fraction"] > 0:  # abort above ~11% QBER
+        finite = ({"n_sample": summary["num_sampled"], **fk_eps}
+                  if fk_eps is not None else None)
         key_arr, corrections, bits_leaked = drive_cascade(
-            rpc, key_arr, summary["qber"], seed + 303, passes=cascade_passes)
+            rpc, key_arr, summary["qber"], seed + 303, passes=cascade_passes,
+            finite=finite)
         secure_len = len(key_arr)
         reconciled = True
+
+    finite_info = None
+    if fk_eps is not None and reconciled:
+        from qne.finite_key import finite_key_length
+        fk = finite_key_length(n_key_in, summary["num_sampled"], summary["qber"],
+                               bits_leaked, **fk_eps)
+        finite_info = {"secret_bits": fk.secret_bits,
+                       "asymptotic_bits": fk.asymptotic_bits,
+                       "qber_upper": fk.qber_upper, "mu": fk.mu, **fk_eps}
 
     bob_key = bits_to_int(key_arr)
     return {"key": bob_key, "detected_pairs": int(sum(surviving)),
             "num_pairs": num_pairs, "reconciled": reconciled,
             "corrections": corrections, "bits_leaked": bits_leaked,
-            "secure_key_bits": secure_len,
+            "secure_key_bits": secure_len, "finite_key": finite_info,
             **summary}

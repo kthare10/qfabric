@@ -85,8 +85,13 @@ class InterceptResendEve:
         return e_basis, e_bit
 
     def intercept_pulses(self, pulses):
-        """Transform a list of [seq, basis, bit] pulses; returns a new list."""
-        return [[seq, *self.intercept(basis, bit)] for seq, basis, bit in pulses]
+        """Transform a list of [seq, basis, bit, ...] pulses; returns a new list.
+
+        Trailing fields (e.g. the decoy-mode photon count) pass through untouched —
+        an intercept-resend Eve re-prepares the state but can't hide the pulse.
+        """
+        return [[seq, *self.intercept(basis, bit), *rest]
+                for seq, basis, bit, *rest in pulses]
 
     @property
     def stats(self) -> dict:

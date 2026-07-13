@@ -20,6 +20,9 @@
 Alice and Bob exchange basis lists and sifting results over a standard
 TCP connection. On FABRIC, this traffic traverses real WAN links,
 introducing realistic classical-quantum feedback latency.
+
+With ``auth_key`` set, every message carries an HMAC tag + sequence number
+(qne/auth.py) — the authenticated classical channel BB84's proof assumes.
 """
 
 from __future__ import annotations
@@ -29,28 +32,40 @@ import socket
 import struct
 from typing import Any
 
+from qne.auth import FrameAuthenticator
+
 
 class ClassicalChannel:
     """TCP-based classical channel for BB84 sifting.
 
     Protocol: length-prefixed JSON messages.
     Each message: [4-byte big-endian length][JSON payload]
+    With authentication: [length][8-byte seq][16-byte tag][JSON payload].
     """
 
-    def __init__(self, sock: socket.socket):
+    def __init__(self, sock: socket.socket, auth_key: bytes | str | None = None):
         self._sock = sock
+        self._auth = FrameAuthenticator(auth_key) if auth_key else None
 
     def send_message(self, msg: dict[str, Any]) -> None:
         """Send a JSON message with length prefix."""
         data = json.dumps(msg).encode("utf-8")
+        if self._auth is not None:
+            data = self._auth.seal(data)
         header = struct.pack("!I", len(data))
         self._sock.sendall(header + data)
 
     def recv_message(self) -> dict[str, Any]:
-        """Receive a length-prefixed JSON message."""
+        """Receive a length-prefixed JSON message.
+
+        Raises qne.auth.AuthError if authentication is on and the frame fails
+        verification (tampering, replay, or key mismatch).
+        """
         header = self._recv_exact(4)
         length = struct.unpack("!I", header)[0]
         data = self._recv_exact(length)
+        if self._auth is not None:
+            data = self._auth.open(data)
         return json.loads(data.decode("utf-8"))
 
     def _recv_exact(self, n: int) -> bytes:
@@ -70,9 +85,11 @@ class ClassicalChannel:
 class ClassicalServer:
     """TCP server side of the classical channel (Bob)."""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 5100):
+    def __init__(self, host: str = "0.0.0.0", port: int = 5100,
+                 auth_key: bytes | str | None = None):
         self.host = host
         self.port = port
+        self.auth_key = auth_key
         self._server_sock: socket.socket | None = None
 
     def start(self) -> None:
@@ -104,7 +121,7 @@ class ClassicalServer:
         if self._server_sock is None:
             raise RuntimeError("Server not started")
         conn, _addr = self._server_sock.accept()
-        return ClassicalChannel(conn)
+        return ClassicalChannel(conn, auth_key=self.auth_key)
 
     def close(self) -> None:
         if self._server_sock:
@@ -122,6 +139,7 @@ class ClassicalClient:
         max_retries: int = 60,
         retry_delay: float = 2.0,
         data_timeout: float = 600.0,
+        auth_key: bytes | str | None = None,
     ) -> ClassicalChannel:
         """Connect to Bob's classical channel server with retries.
 
@@ -147,7 +165,7 @@ class ClassicalClient:
                     sock.settimeout(timeout)
                     sock.connect(sockaddr)
                     sock.settimeout(data_timeout)  # generous timeout for the sifting exchange
-                    return ClassicalChannel(sock)
+                    return ClassicalChannel(sock, auth_key=auth_key)
                 except OSError as e:
                     last_err = e
                     sock.close()

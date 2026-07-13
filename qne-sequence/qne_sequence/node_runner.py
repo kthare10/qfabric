@@ -57,7 +57,13 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
              dst_mac: str = "02:00:00:00:00:02", wavelength: int = 0,
              photon_drain_ms: float = 200.0, loss: str = "auto",
              photon_rate_hz: float = 10000.0, eve_fraction: float = 0.0,
-             do_reconcile: bool = True, cascade_passes: int = 4) -> dict:
+             do_reconcile: bool = True, cascade_passes: int = 4,
+             finite_key: bool = False, eps_sec: float = 1e-9,
+             eps_cor: float = 1e-15, auth_key: str | None = None,
+             basis_bias: float = 0.5, dead_time: float = 0.0,
+             timing_jitter: float = 0.0, pulse_period_ns: float = 0.0,
+             decoy: bool = False, mu_signal: float = 0.6, mu_decoy: float = 0.1,
+             mu_vacuum: float = 0.001, decoy_probs: str = "0.7,0.2,0.1") -> dict:
     role = _ROLES[role_name]
 
     # Photon loss policy (independent of transport):
@@ -66,6 +72,26 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
     #   switch -> no software drop; an external BMv2 P4 switch applies it (raw only)
     #   auto   -> model for tcp, switch for raw (conventional default; unchanged)
     loss_where = ("model" if quantum_transport == "tcp" else "switch") if loss == "auto" else loss
+
+    # Decoy-state source: fiber loss is folded into the per-photon binomial
+    # thinning at the source (the descriptor carries the SURVIVING photon count),
+    # so the channel itself must not drop descriptors — a lost descriptor would be
+    # double-counted loss AND wreck the vacuum gain (empty pulses still dark-count).
+    decoy_cfg = None
+    if decoy:
+        if quantum_transport != "tcp":
+            raise ValueError("--decoy requires --quantum-transport tcp "
+                             "(the 0x7101 frame has no photon-count field yet)")
+        probs = [float(x) for x in decoy_probs.split(",")]
+        if len(probs) != 3 or abs(sum(probs) - 1.0) > 1e-9:
+            raise ValueError(f"--decoy-probs needs 3 values summing to 1, got {decoy_probs}")
+        p_loss = loss_probability(distance_km, attenuation) if loss_where == "model" else 0.0
+        decoy_cfg = {
+            "intensities": {"signal": mu_signal, "decoy": mu_decoy, "vacuum": mu_vacuum},
+            "probs": probs,
+            "loss_probability": p_loss,
+        }
+        loss_where = "none"     # channel stays lossless; thinning already applied
 
     tl = RealTimeTimeline(time_scale=time_scale)
     node = QKDNode(name, tl, stack_size=1, seed=seed)
@@ -81,7 +107,10 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
     detector = None
     if role == 1:
         detector = Detector(efficiency=efficiency, dark_count_rate=dark_count_rate,
-                            polarization_error=1.0 - fidelity, seed=seed + 1)
+                            polarization_error=1.0 - fidelity, seed=seed + 1,
+                            basis_bias=basis_bias, dead_time=dead_time,
+                            timing_jitter=timing_jitter,
+                            pulse_period_ns=pulse_period_ns)
 
     # raw mode: photons (P4 path) race the TCP QUBITS_DONE marker -> drain window
     drain_ps = int(photon_drain_ms * 1e9) if quantum_transport == "raw" else 0
@@ -97,12 +126,13 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
                           f"{name}.qsdetector", role=role, seed=seed, on_key=on_key,
                           detector=detector, sample_fraction=sample_fraction,
                           num_pulses=num_pulses, photon_mode=photon_mode,
-                          photon_drain_ps=drain_ps, eavesdropper=eve)
+                          photon_drain_ps=drain_ps, eavesdropper=eve,
+                          basis_bias=basis_bias, decoy=decoy_cfg)
     node.set_protocol_layer(0, dbb)
     pair_distributed(dbb, role, f"{peer}.BB84", peer)
 
     # classical control plane: TCP (Bob listens, Alice connects) — real WAN on FABRIC
-    link = Link()
+    link = Link(auth_key=auth_key)
     if role == 1:
         link.serve(host, port)
     else:
@@ -167,14 +197,28 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
     secure_ok = dbb.metrics.get("secure_fraction", 0.0) > 0
     if do_reconcile and sift_key and secure_ok:
         rpc = RpcChannel(link)   # rebinds link.on_frame to a buffered queue
+        finite = ({"n_sample": int(result.get("num_sampled") or 0),
+                   "eps_sec": eps_sec, "eps_cor": eps_cor} if finite_key else None)
         if role == 1:            # Bob drives Cascade + announces the PA hash
             final_key, corrections, bits_leaked = drive_cascade(
-                rpc, sift_key, qber, seed + 303, passes=cascade_passes)
+                rpc, sift_key, qber, seed + 303, passes=cascade_passes, finite=finite)
         else:                    # Alice answers parities, then applies the same PA hash
             final_key, corrections, bits_leaked = serve_parities(rpc, sift_key)
         reconciled = True
 
     link.close()
+
+    # Finite-key accounting (metrics): both sides hold identical inputs — the same
+    # sample size, QBER, and (announced) Cascade leak — so they report the same bound.
+    finite_info = None
+    if finite_key and reconciled:
+        from qne.finite_key import finite_key_length
+        fk = finite_key_length(len(sift_key), int(result.get("num_sampled") or 0),
+                               qber, bits_leaked, eps_sec=eps_sec, eps_cor=eps_cor)
+        finite_info = {"secret_bits": fk.secret_bits,
+                       "asymptotic_bits": fk.asymptotic_bits,
+                       "qber_upper": fk.qber_upper, "mu": fk.mu,
+                       "eps_sec": eps_sec, "eps_cor": eps_cor}
 
     # Report the extracted secret key — reconciled+amplified → identical bit-for-bit.
     reconciled_key = bits_to_int(final_key) if final_key else result.get("key")
@@ -186,6 +230,11 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         "loss_where": loss_where,
         "key": reconciled_key,                       # post-Cascade key (Bob corrected)
         "qber": result.get("qber"),
+        "qber_x": result.get("qber_x"),
+        "basis_bias": basis_bias,
+        "sift_ratio": result.get("sift_ratio"),
+        "detected_pulses": result.get("detected_pulses"),
+        "dead_time_drops": detector.dead_time_drops if detector else None,
         "sifted_bits": result.get("sifted_bits"),
         "key_bits": result.get("key_bits"),          # sifted minus disclosed sample
         "num_sampled": result.get("num_sampled"),
@@ -195,34 +244,96 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         "corrections": corrections,
         "bits_leaked": bits_leaked,
         "secure_key_bits": secure_key_len,
+        "finite_key": finite_info,
         "photon_mode": result.get("photon_mode", photon_mode),
         "photons_emitted": result.get("photons_emitted"),
         "elapsed_s": result.get("elapsed_s"),
         "photons_per_s": result.get("photons_per_s"),
-        "loss_probability": 0.0 if loss_where == "none" else loss_probability(distance_km, attenuation),
+        "loss_probability": (decoy_cfg["loss_probability"] if decoy_cfg else
+                             0.0 if loss_where == "none" else
+                             loss_probability(distance_km, attenuation)),
+        "decoy": result.get("decoy"),
         "eve_fraction": eve_fraction,
         "eve_photons_intercepted": result.get("eve_photons_intercepted"),
         "tx_frames": link.tx_count,
         "rx_frames": link.rx_count,
+        "authenticated": auth_key is not None,
+        "auth_failures": link.auth_failures,
         "remote_access_errors": len(tl.remote_access_errors),
     }
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Run one distributed SeQUeNCe QKD node.")
-    ap.add_argument("--role", required=True, choices=list(_ROLES))
-    ap.add_argument("--protocol", choices=["bb84", "e91", "bbm92"], default="bb84",
+    ap.add_argument("--role", required=True, choices=[*_ROLES, "repeater"])
+    ap.add_argument("--protocol", choices=["bb84", "e91", "bbm92", "repeater"],
+                    default="bb84",
                     help="bb84=prepare-and-measure; e91/bbm92=entanglement-based "
-                         "(shared quantum-state service; alice hosts the register)")
+                         "(shared quantum-state service; alice hosts the register); "
+                         "repeater=3-process entanglement-swapping chain "
+                         "(alice=source/register, repeater=swap+herald, bob=far end)")
     ap.add_argument("--num-pairs", type=int, default=20000,
                     help="entanglement protocols: Bell pairs to generate")
+    ap.add_argument("--chain-mode", choices=["bbm92", "e91"], default="bbm92",
+                    help="repeater protocol: bbm92=Z/X key; e91=adds the CHSH "
+                         "Bell test across the swapped chain")
+    ap.add_argument("--port-ar", type=int, default=0,
+                    help="repeater protocol: alice<->repeater link port "
+                         "(0 = --port + 1; the repeater listens)")
+    ap.add_argument("--port-rb", type=int, default=0,
+                    help="repeater protocol: repeater->bob herald link port "
+                         "(0 = --port + 2; bob listens)")
+    ap.add_argument("--no-correction", dest="correction", action="store_false",
+                    help="repeater protocol: skip the heralded Pauli correction "
+                         "(control run — QBER collapses to 0.5)")
+    ap.add_argument("--bob-host", default=None,
+                    help="repeater protocol: address where bob's listeners are "
+                         "reached (default: --host; set on FABRIC where each "
+                         "link terminates on a different node)")
+    ap.add_argument("--repeater-host", default=None,
+                    help="repeater protocol: address where the repeater "
+                         "station's listener is reached (default: --host)")
     ap.add_argument("--reconcile", action=argparse.BooleanOptionalAction, default=True,
                     help="run Cascade error reconciliation so both keys match "
                          "bit-for-bit (--no-reconcile to skip)")
     ap.add_argument("--cascade-passes", type=int, default=4,
                     help="number of Cascade passes")
+    ap.add_argument("--finite-key", action="store_true",
+                    help="size privacy amplification with the finite-key bound "
+                         "(Serfling-corrected QBER + eps terms) instead of the "
+                         "asymptotic fraction; adds finite_key metrics")
+    ap.add_argument("--eps-sec", type=float, default=1e-9,
+                    help="finite-key security failure budget")
+    ap.add_argument("--eps-cor", type=float, default=1e-15,
+                    help="finite-key correctness failure budget")
+    ap.add_argument("--auth-key", default=None,
+                    help="pre-shared key: HMAC-authenticate every classical frame "
+                         "(tag + anti-replay seq); both sides must pass the same key")
+    ap.add_argument("--basis-bias", type=float, default=0.5,
+                    help="P(Z basis) for both sides; >0.5 = efficient BB84 "
+                         "(sift ratio p^2+(1-p)^2 > 50%%; key from Z, X estimates "
+                         "the phase error)")
+    ap.add_argument("--dead-time", type=float, default=0.0,
+                    help="detector dead time in ns after each click "
+                         "(needs --pulse-period-ns to place arrivals)")
+    ap.add_argument("--timing-jitter", type=float, default=0.0,
+                    help="detector timing jitter sigma in ns (clicks outside the "
+                         "1 ns gate are lost)")
+    ap.add_argument("--pulse-period-ns", type=float, default=0.0,
+                    help="emulated pulse slot spacing in ns (arrival time of "
+                         "photon k = k*period); required for dead-time gating")
+    ap.add_argument("--decoy", action="store_true",
+                    help="decoy-state source on the live transport: Poisson(mu) "
+                         "photons per pulse at 3 intensities, measured gains/QBERs "
+                         "feed the Lo-Ma-Chen/GLLP analysis (key from signal pulses)")
+    ap.add_argument("--mu-signal", type=float, default=0.6)
+    ap.add_argument("--mu-decoy", type=float, default=0.1)
+    ap.add_argument("--mu-vacuum", type=float, default=0.001)
+    ap.add_argument("--decoy-probs", default="0.7,0.2,0.1",
+                    help="P(signal),P(decoy),P(vacuum) per pulse, comma-separated")
     ap.add_argument("--name", required=True)
-    ap.add_argument("--peer", required=True)
+    ap.add_argument("--peer", default=None,
+                    help="peer node name (required for the two-party protocols)")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=57123)
     ap.add_argument("--key-length", type=int, default=128)
@@ -267,6 +378,32 @@ def main(argv=None) -> int:
                          "[0,1]. Adds QBER ~ 0.25*f on the sifted key (BB84 path).")
     args = ap.parse_args(argv)
 
+    if args.role == "repeater" and args.protocol != "repeater":
+        ap.error("--role repeater requires --protocol repeater")
+    if args.protocol != "repeater" and not args.peer:
+        ap.error("--peer is required for the two-party protocols")
+
+    if args.protocol == "repeater":
+        from .distributed_repeater import ROLES as _ROLES3
+        from .distributed_repeater import run_repeater_node
+        loss_p = (0.0 if args.loss == "none"
+                  else loss_probability(args.distance_km, args.attenuation))
+        result = run_repeater_node(
+            _ROLES3[args.role], args.name, args.host,
+            port_ab=args.port,
+            port_ar=args.port_ar or args.port + 1,
+            port_rb=args.port_rb or args.port + 2,
+            num_pairs=args.num_pairs, fidelity=args.fidelity,
+            loss_probability=loss_p, mode=args.chain_mode,
+            sample_fraction=args.sample_fraction, seed=args.seed,
+            do_reconcile=args.reconcile, cascade_passes=args.cascade_passes,
+            finite_key=args.finite_key, eps_sec=args.eps_sec,
+            eps_cor=args.eps_cor, auth_key=args.auth_key,
+            apply_correction=args.correction,
+            bob_host=args.bob_host, repeater_host=args.repeater_host)
+        print(json.dumps(result))
+        return 0
+
     if args.protocol in ("e91", "bbm92"):
         from .distributed_e91 import run_e91_node
         loss_p = (0.0 if args.loss == "none"
@@ -276,7 +413,9 @@ def main(argv=None) -> int:
             num_pairs=args.num_pairs, fidelity=args.fidelity,
             loss_probability=loss_p, mode=args.protocol,
             sample_fraction=args.sample_fraction, seed=args.seed,
-            do_reconcile=args.reconcile, cascade_passes=args.cascade_passes)
+            do_reconcile=args.reconcile, cascade_passes=args.cascade_passes,
+            finite_key=args.finite_key, eps_sec=args.eps_sec, eps_cor=args.eps_cor,
+            auth_key=args.auth_key)
         print(json.dumps(result))
         return 0
 
@@ -288,7 +427,11 @@ def main(argv=None) -> int:
                       args.quantum_transport, args.photon_iface, args.src_mac,
                       args.dst_mac, args.wavelength, args.photon_drain_ms, args.loss,
                       args.photon_rate_hz, args.eve_fraction,
-                      args.reconcile, args.cascade_passes)
+                      args.reconcile, args.cascade_passes,
+                      args.finite_key, args.eps_sec, args.eps_cor, args.auth_key,
+                      args.basis_bias, args.dead_time, args.timing_jitter,
+                      args.pulse_period_ns, args.decoy, args.mu_signal,
+                      args.mu_decoy, args.mu_vacuum, args.decoy_probs)
     print(json.dumps(result))
     return 0
 

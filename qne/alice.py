@@ -33,6 +33,7 @@ from qne.channel import ClassicalClient
 from qne.config import ScenarioConfig
 from qne.metrics import MetricsCollector
 from qne.photon import PhotonPacket
+from qne.reconcile import ChannelRpc, bits_to_int, serve_parities
 
 
 class Alice:
@@ -53,13 +54,16 @@ class Alice:
         bob_port: int = 5100,
         dst_mac: bytes | None = None,
         src_mac: bytes | None = None,
+        auth_key: bytes | str | None = None,
     ):
         self.config = config
         self.interface = interface
         self.bob_host = bob_host
         self.bob_port = bob_port
+        self.auth_key = auth_key
         self.rng = np.random.default_rng(config.seed)
         self.sent_log: list[AliceRecord] = []
+        self.final_key: int | None = None    # extracted secret (post Cascade + PA)
         self.collector = MetricsCollector(config.name)
 
         # Destination MAC for photon frames (default: dummy, override for FABRIC)
@@ -93,6 +97,10 @@ class Alice:
         print(f"  QBER:            {metrics.qber:.4f}")
         print(f"  Secure key rate: {metrics.secure_key_rate:.4f}")
         print(f"  Final key bits:  {metrics.final_key_bits}")
+        if metrics.reconciled:
+            print(f"  Reconciled:      yes ({metrics.corrections} corrections, "
+                  f"{metrics.bits_leaked} bits leaked)")
+            print(f"  Secure key bits: {metrics.secure_key_bits}")
         print(f"  Elapsed:         {metrics.elapsed_seconds:.2f}s")
 
         return metrics
@@ -111,8 +119,9 @@ class Alice:
 
         print(f"Alice: Sending {num_photons} photons on {self.interface}")
 
+        bias = self.config.protocol.basis_bias   # P(Z); 0.5 = standard BB84
         for seq in range(num_photons):
-            basis = int(self.rng.integers(0, 2))
+            basis = 0 if self.rng.random() < bias else 1
             state = int(self.rng.integers(0, 2))
 
             pkt = PhotonPacket(
@@ -140,9 +149,15 @@ class Alice:
         print(f"Alice: Finished sending {num_photons} photons")
 
     def _run_sifting(self) -> None:
-        """Connect to Bob and perform BB84 sifting."""
+        """Connect to Bob; sift, answer the sample request, then serve Cascade.
+
+        Bob picks the disclosed QBER sample (Alice reveals ONLY those bits) and
+        drives Cascade; Alice answers parity queries and applies the announced
+        Toeplitz hash, so both extract the identical secret (qne.reconcile).
+        """
         print(f"Alice: Connecting to Bob at {self.bob_host}:{self.bob_port}")
-        channel = ClassicalClient.connect(self.bob_host, self.bob_port)
+        channel = ClassicalClient.connect(self.bob_host, self.bob_port,
+                                          auth_key=self.auth_key)
 
         try:
             # Send Alice's basis list to Bob
@@ -164,20 +179,33 @@ class Alice:
             # Index sent log for fast lookup (used to answer Bob's sample request).
             sent_by_seq = {rec.sequence_num: rec for rec in self.sent_log}
 
-            # Bob may request Alice's sample bits for QBER computation
+            # Bob requests a random SAMPLE for QBER; only those bits are revealed.
+            sample: list[int] = []
             sample_req = channel.recv_message()
             if sample_req.get("type") == "request_sample":
-                # Send Alice's bit values for sifted positions
-                req_indices = sample_req["matching_indices"]
-                bits = [sent_by_seq[seq].bit_value for seq in req_indices]
+                sample = [int(s) for s in sample_req["sample_indices"]]
                 channel.send_message({
                     "type": "alice_sample_bits",
-                    "bits": bits,
+                    "bits": [sent_by_seq[seq].bit_value for seq in sample],
                 })
 
             # Receive QBER estimate from Bob
             qber_msg = channel.recv_message()
             assert qber_msg["type"] == "qber_result"
+
+            # Key = sifted minus disclosed, in the shared sorted order; serve
+            # Cascade parities over it if Bob decided the run is reconcilable.
+            sample_set = set(sample)
+            key_order = [s for s in matching_seqs if s not in sample_set]
+            key_bits = [sent_by_seq[s].bit_value for s in key_order]
+            reconciled = False
+            corrections = bits_leaked = 0
+            final = key_bits
+            if qber_msg.get("reconcile"):
+                final, corrections, bits_leaked = serve_parities(
+                    ChannelRpc(channel), key_bits)
+                reconciled = True
+            self.final_key = bits_to_int(final) if reconciled else None
 
             self.collector.record_received(len(bob_detected_seqs))
             self.collector.set_sifting_results(
@@ -189,6 +217,10 @@ class Alice:
                 raw_rate=qber_msg["raw_key_rate"],
                 secure_rate=qber_msg["secure_key_rate"],
                 final_bits=qber_msg["final_key_bits"],
+            )
+            self.collector.set_reconciliation(
+                reconciled, corrections, bits_leaked,
+                len(final) if reconciled else 0,
             )
 
         finally:

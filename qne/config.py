@@ -50,6 +50,7 @@ class ProtocolConfig:
     send_rate_hz: float = 1_000_000.0  # photons per second
     sample_fraction: float = 0.1  # fraction of sifted bits used for QBER estimation
     wavelength: int = 0  # channel tag
+    basis_bias: float = 0.5  # P(Z basis); >0.5 = efficient BB84 (sift > 50%)
 
 
 @dataclass
@@ -118,6 +119,7 @@ class ScenarioConfig:
                 send_rate_hz=protocol_data.get("send_rate_hz", 1_000_000.0),
                 sample_fraction=protocol_data.get("sample_fraction", 0.1),
                 wavelength=protocol_data.get("wavelength", 0),
+                basis_bias=protocol_data.get("basis_bias", 0.5),
             ),
             seed=data.get("seed", 42),
         )
@@ -142,6 +144,7 @@ class ScenarioConfig:
                 "send_rate_hz": self.protocol.send_rate_hz,
                 "sample_fraction": self.protocol.sample_fraction,
                 "wavelength": self.protocol.wavelength,
+                "basis_bias": self.protocol.basis_bias,
             },
             "seed": self.seed,
         }
