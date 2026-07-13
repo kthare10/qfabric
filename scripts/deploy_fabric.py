@@ -916,17 +916,20 @@ def run_network_conditions_experiment(
     return rows
 
 
-def setup_sequence_runtime(slice_obj, venv=".venv-qne"):
-    """Build the distributed-SeQUeNCe emulator runtime on BOTH alice and bob.
+def setup_sequence_runtime(slice_obj, venv=".venv-qne", nodes=("alice", "bob")):
+    """Build the distributed-SeQUeNCe emulator runtime on the given nodes.
 
     `qne_sequence.node_runner` needs `sequence==1.0.0` (Python 3.12) + numpy, plus
     qfabric's own `qne` package (reached via PYTHONPATH=~/qfabric). This installs a
-    dedicated `.venv-qne` on each endpoint and verifies the full import chain
+    dedicated `.venv-qne` on each node and verifies the full import chain
     (sequence + qne + qne_sequence). Idempotent. Run once per slice (after
     upload_project so qne-sequence/ is present on the nodes).
+
+    Default nodes are the two endpoints; pass ("alice", "bob", "switch") when the
+    switch node will host the repeater station (run_sequence_repeater).
     """
-    print(f"\n=== Setting up SeQUeNCe-emulator runtime ({venv}) on alice + bob ===")
-    for name in ("alice", "bob"):
+    print(f"\n=== Setting up SeQUeNCe-emulator runtime ({venv}) on {'+'.join(nodes)} ===")
+    for name in nodes:
         node = slice_obj.get_node(name)
         print(f"  [{name}] python3.12 venv + sequence==1.0.0 ...")
         node.execute(
@@ -946,7 +949,143 @@ def setup_sequence_runtime(slice_obj, venv=".venv-qne"):
             quiet=True,
         )
         print(f"    {name}: {check.strip()}")
-    print("  SeQUeNCe-emulator runtime ready on alice + bob")
+    print(f"  SeQUeNCe-emulator runtime ready on {'+'.join(nodes)}")
+
+
+def setup_repeater_bridge(slice_obj, station_ip="10.10.1.3"):
+    """Give the switch node a data-plane presence — the repeater STATION.
+
+    The repeater protocol has no photon plane, so BMv2 isn't needed; what the
+    middle node needs instead is a TCP endpoint on the 10.10.1.0/24 data plane
+    (the FABRIC management network blocks arbitrary TCP). This:
+
+      1. stops BMv2 — the `bmv2` Docker container (mutually exclusive with the
+         bridge — both would forward, and BMv2 holds the ports),
+      2. joins the switch's two data-plane interfaces in a Linux bridge
+         (`br-qne`) carrying ``station_ip``, with ip_forward on so alice<->bob
+         traffic still crosses the middle node (now via the kernel instead of
+         BMv2),
+      3. installs static ARP on all three nodes (the same FABRIC/OVS MAC-learning
+         workaround as setup_dataplane_ips: endpoints address the switch-port
+         MACs, which are always known on their L2 segment).
+
+    Four things make it actually work — all learned the hard way on the first
+    live run (validated end-to-end: alice & bob extract an identical key):
+      * The `bridge` kernel module is `modprobe`d first. On a fresh switch VM it
+        isn't loaded, so `ip link add type bridge` silently fails and br-qne is
+        never created (the ports get flushed but never enslaved).
+      * ``br-qne`` is given the ALICE-side port MAC (``sw_a_mac``). The station IP
+        lives on the bridge, and the endpoints address switch-port MACs; if the
+        bridge kept its own auto-assigned MAC, nothing on Alice's segment would
+        answer ``station_ip`` and ``alice -> station`` fails (the run then hangs
+        at Alice's first connect). Enslaved-port MACs are local FDB entries, so
+        Bob's segment still reaches the bridge via ``sw_b_mac``.
+      * The kernel FORWARD path is explicitly opened (``iptables -P FORWARD
+        ACCEPT`` + ``rp_filter=0``). BMv2's Docker install typically leaves the
+        FORWARD chain on DROP, which silently kills the routed alice<->bob tail.
+      * ICMP redirects are disabled (``send_redirects=0`` on the switch,
+        ``accept_redirects=0`` on the endpoints). alice<->bob is routed back out
+        the same interface, so without this the switch spams redirects and the
+        path drops ~50% of packets.
+
+    Prereq: setup_dataplane_ips already ran (alice/bob hold 10.10.1.1/.2).
+    Reversible: re-run notebook 02 / configure_switch to restore BMv2.
+    Raises RuntimeError if connectivity can't be established (so the caller never
+    launches the 3-process run into a hang).
+    """
+    print(f"\n=== Setting up repeater station bridge (station {station_ip}) ===")
+    alice = slice_obj.get_node("alice")
+    bob = slice_obj.get_node("bob")
+    switch = slice_obj.get_node("switch")
+
+    if_a = switch.get_interface(network_name="net_alice_switch").get_device_name()
+    if_b = switch.get_interface(network_name="net_switch_bob").get_device_name()
+    sw_a_mac = switch.get_interface(network_name="net_alice_switch").get_mac().lower()
+    sw_b_mac = switch.get_interface(network_name="net_switch_bob").get_mac().lower()
+    alice_iface = alice.get_interface(network_name="net_alice_switch").get_device_name()
+    bob_iface = bob.get_interface(network_name="net_switch_bob").get_device_name()
+    alice_mac = alice.get_interface(network_name="net_alice_switch").get_mac().lower()
+    bob_mac = bob.get_interface(network_name="net_switch_bob").get_mac().lower()
+
+    print(f"  switch: br-qne over {if_a} + {if_b} (MAC {sw_a_mac}), "
+          "ip_forward + FORWARD ACCEPT (BMv2 stopped)")
+    switch.execute(
+        # BMv2 runs as the `bmv2` Docker container (--network host, see
+        # configure_switch); `pkill simple_switch` on the host CANNOT stop it and
+        # it keeps L2-forwarding + holding the ports, which blocks the bridge.
+        "sudo docker rm -f bmv2 >/dev/null 2>&1 || true; "
+        "sudo pkill -f simple_switch >/dev/null 2>&1 || true; sleep 1; "
+        # a fresh switch VM doesn't have the bridge module loaded, so
+        # `ip link add type bridge` silently fails — load it first.
+        "sudo modprobe bridge || true; "
+        "sudo ip link del br-qne 2>/dev/null || true; "
+        "sudo ip link add name br-qne type bridge; "
+        f"sudo ip addr flush dev {if_a}; sudo ip addr flush dev {if_b}; "
+        f"sudo ip link set {if_a} master br-qne; sudo ip link set {if_b} master br-qne; "
+        f"sudo ip link set {if_a} up; sudo ip link set {if_b} up; "
+        # bridge takes the alice-side port MAC so station_ip is answerable there
+        "sudo ip link set br-qne down; "
+        f"sudo ip link set br-qne address {sw_a_mac}; "
+        "sudo ip addr flush dev br-qne; "
+        f"sudo ip addr add {station_ip}/24 dev br-qne; "
+        "sudo ip link set br-qne up; "
+        "sudo sysctl -qw net.ipv4.ip_forward=1; "
+        "sudo sysctl -qw net.ipv4.conf.all.rp_filter=0; "
+        "sudo sysctl -qw net.ipv4.conf.br-qne.rp_filter=0 2>/dev/null; "
+        # alice<->bob is routed back out the same interface, so the switch would
+        # send ICMP redirects and the path goes flaky (~50% loss) — disable them.
+        "sudo sysctl -qw net.ipv4.conf.all.send_redirects=0; "
+        "sudo sysctl -qw net.ipv4.conf.br-qne.send_redirects=0 2>/dev/null; "
+        f"sudo sysctl -qw net.ipv4.conf.{if_a}.send_redirects=0 2>/dev/null; "
+        f"sudo sysctl -qw net.ipv4.conf.{if_b}.send_redirects=0 2>/dev/null; "
+        # don't let bridged frames get dropped by ip/nftables (br_netfilter)
+        "sudo sysctl -qw net.bridge.bridge-nf-call-iptables=0 2>/dev/null; "
+        # BMv2's Docker install usually leaves FORWARD on DROP -> open it
+        "sudo iptables -P FORWARD ACCEPT; sudo iptables -F FORWARD",
+        quiet=True,
+    )
+    # station -> endpoints (their NIC MACs are known on their own segments)
+    switch.execute(
+        f"sudo ip neigh replace 10.10.1.1 lladdr {alice_mac} nud permanent dev br-qne; "
+        f"sudo ip neigh replace 10.10.1.2 lladdr {bob_mac} nud permanent dev br-qne",
+        quiet=True,
+    )
+    # endpoints -> station via their switch-side port MAC (== br-qne's MAC on the
+    # alice side; a local FDB entry on the bob side) — always known to FABRIC OVS
+    alice.execute(
+        f"sudo ip neigh replace {station_ip} lladdr {sw_a_mac} nud permanent dev {alice_iface}; "
+        "sudo sysctl -qw net.ipv4.conf.all.accept_redirects=0; "
+        f"sudo sysctl -qw net.ipv4.conf.{alice_iface}.accept_redirects=0 2>/dev/null; "
+        "sudo ip route flush cache",
+        quiet=True,
+    )
+    bob.execute(
+        f"sudo ip neigh replace {station_ip} lladdr {sw_b_mac} nud permanent dev {bob_iface}; "
+        "sudo sysctl -qw net.ipv4.conf.all.accept_redirects=0; "
+        f"sudo sysctl -qw net.ipv4.conf.{bob_iface}.accept_redirects=0 2>/dev/null; "
+        "sudo ip route flush cache",
+        quiet=True,
+    )
+
+    print("  Testing connectivity (the three links the repeater needs)...")
+    checks = [("alice", alice, station_ip),   # ar link: Alice -> repeater station
+              ("alice", alice, "10.10.1.2"),  # ab link: Alice -> Bob (routed via station)
+              ("switch", switch, "10.10.1.2")]  # rb link: station -> Bob (heralds)
+    bad = []
+    for who, node, target in checks:
+        stdout, _ = node.execute(f"ping -c 3 -W 2 {target}", quiet=True)
+        good = "0 received" not in stdout and "100% packet loss" not in stdout
+        print(f"    {who} -> {target}: {'ok' if good else 'FAILED'}")
+        if not good:
+            bad.append(f"{who}->{target}")
+    if bad:
+        raise RuntimeError(
+            f"repeater station connectivity failed for: {', '.join(bad)}. "
+            "Inspect on the switch: `ip addr show br-qne`, `ip -br link show master "
+            "br-qne`, `sudo iptables -S FORWARD`. Do NOT run the 3-process chain "
+            "until all three links ping.")
+    print("  All three links reachable — ready for run_sequence_repeater.")
+    return station_ip
 
 
 def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
@@ -955,7 +1094,11 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
                       photon_mode="bulk", photon_drain_ms=500, port=5100,
                       bob_data_ip="10.10.1.2", venv=".venv-qne",
                       transport="raw", loss="auto", photon_rate_hz=10000.0,
-                      eve_fraction=0.0, reconcile=True, cascade_passes=4):
+                      eve_fraction=0.0, reconcile=True, cascade_passes=4,
+                      auth_key=None, finite_key=False, basis_bias=0.5,
+                      dead_time=0.0, timing_jitter=0.0, pulse_period_ns=0.0,
+                      decoy=False, mu_signal=0.6, mu_decoy=0.1, mu_vacuum=0.001,
+                      decoy_probs="0.7,0.2,0.1"):
     """Run distributed-SeQUeNCe BB84 across the slice (raw 0x7101 photons via P4).
 
     Runs real SeQUeNCe QKDNode/BB84 instances (via `qne_sequence.node_runner`) on
@@ -1015,7 +1158,16 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
               f"--photon-drain-ms {photon_drain_ms} --photon-rate-hz {photon_rate_hz} "
               f"--eve-fraction {eve_fraction} --cascade-passes {cascade_passes} "
               f"{'--reconcile' if reconcile else '--no-reconcile'} "
+              f"--basis-bias {basis_bias} --dead-time {dead_time} "
+              f"--timing-jitter {timing_jitter} --pulse-period-ns {pulse_period_ns} "
               f"--port {port}")
+    if auth_key:
+        common += f" --auth-key {auth_key}"
+    if finite_key:
+        common += " --finite-key"
+    if decoy:
+        common += (f" --decoy --mu-signal {mu_signal} --mu-decoy {mu_decoy} "
+                   f"--mu-vacuum {mu_vacuum} --decoy-probs {decoy_probs}")
     # raw sockets need root; env sets PYTHONPATH for `import qne`; cwd holds qne_sequence
     runner = (f"cd ~/qfabric/qne-sequence && sudo env PYTHONPATH=$HOME/qfabric "
               f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner")
@@ -1079,7 +1231,8 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
 def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
                      distance_km=1.0, attenuation=0.2, mode="e91",
                      sample_fraction=0.2, reconcile=True, port=5100,
-                     bob_data_ip="10.10.1.2", venv=".venv-qne"):
+                     bob_data_ip="10.10.1.2", venv=".venv-qne",
+                     auth_key=None, finite_key=False):
     """Run distributed E91/BBM92 entanglement-based QKD across the slice.
 
     Unlike BB84, entanglement has **no photon plane / no P4 switch**: Alice hosts
@@ -1111,6 +1264,10 @@ def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
               f"--distance-km {distance_km} --attenuation {attenuation} "
               f"--sample-fraction {sample_fraction} "
               f"{'--reconcile' if reconcile else '--no-reconcile'} --port {port}")
+    if auth_key:
+        common += f" --auth-key {auth_key}"
+    if finite_key:
+        common += " --finite-key"
     # no raw sockets / no root needed — entanglement uses only the TCP link
     runner = (f"cd ~/qfabric/qne-sequence && env PYTHONPATH=$HOME/qfabric "
               f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner")
@@ -1167,6 +1324,135 @@ def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
     if a_res and b_res and a_res.get("key") is not None:
         print(f"  keys match bit-for-bit: {a_res['key'] == b_res['key']}")
     return a_res, b_res
+
+
+def run_sequence_repeater(slice_obj, *, num_pairs=20000, fidelity=0.95,
+                          distance_km=1.0, attenuation=0.2, chain_mode="bbm92",
+                          sample_fraction=0.2, reconcile=True, cascade_passes=4,
+                          port=5100, station_ip="10.10.1.3",
+                          bob_data_ip="10.10.1.2", venv=".venv-qne",
+                          auth_key=None, finite_key=False,
+                          apply_correction=True):
+    """Run the entanglement-swapping repeater chain across the slice — 3 nodes.
+
+    The repeater STATION runs on the switch node, physically between the
+    endpoints, so all three classical links traverse real FABRIC segments:
+    alice<->station (swap plan + BSM RPCs), station->bob (the HERALDS — the
+    multi-hop latency lever), and alice<->bob (sift/QBER/CHSH + Cascade+PA,
+    kernel-forwarded through the station).
+
+    ``chain_mode``: 'bbm92' (Z/X key) or 'e91' (adds the CHSH Bell test across
+    the swapped chain). ``distance_km``/``attenuation`` set the per-LINK pair
+    loss. Prereqs: upload_project, setup_dataplane_ips, setup_repeater_bridge
+    (replaces BMv2 with the station bridge), and
+    setup_sequence_runtime(slice, nodes=("alice", "bob", "switch")).
+
+    Returns (alice_result, bob_result, repeater_result) dicts.
+    """
+    import json as _json
+
+    alice = slice_obj.get_node("alice")
+    bob = slice_obj.get_node("bob")
+    switch = slice_obj.get_node("switch")
+    port_ar, port_rb = port + 1, port + 2
+
+    print(f"\n=== Running distributed repeater chain ({chain_mode}, "
+          f"station on switch node) ===")
+    print(f"  links: alice->{station_ip}:{port_ar} (BSM), "
+          f"station->{bob_data_ip}:{port_rb} (heralds), "
+          f"alice->{bob_data_ip}:{port} (QKD tail)")
+    print(f"  pairs={num_pairs} F={fidelity} per-link dist={distance_km}km "
+          f"atten={attenuation}dB/km sample_frac={sample_fraction}")
+
+    for node in (alice, bob, switch):
+        node.execute("sudo pkill -f qne_sequence.node_runner 2>/dev/null; "
+                     "sudo rm -f /tmp/rep_*.log; sleep 1", quiet=True)
+
+    common = (f"--protocol repeater --chain-mode {chain_mode} "
+              f"--num-pairs {num_pairs} --fidelity {fidelity} "
+              f"--distance-km {distance_km} --attenuation {attenuation} "
+              f"--sample-fraction {sample_fraction} "
+              f"--cascade-passes {cascade_passes} "
+              f"{'--reconcile' if reconcile else '--no-reconcile'} "
+              f"{'' if apply_correction else '--no-correction '}"
+              f"--port {port} --port-ar {port_ar} --port-rb {port_rb}")
+    if auth_key:
+        common += f" --auth-key {auth_key}"
+    if finite_key:
+        common += " --finite-key"
+    # no raw sockets / no root needed — the chain uses only the TCP links
+    runner = (f"cd ~/qfabric/qne-sequence && env PYTHONPATH=$HOME/qfabric "
+              f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner")
+
+    print("  Starting Bob (listens for alice + station)...")
+    bob_thread = bob.execute_thread(
+        f"{runner} --role bob --name bob --host 0.0.0.0 --seed 2 "
+        f"{common} 2>&1 | tee /tmp/rep_bob.log")
+    time.sleep(8)
+
+    print("  Starting repeater station (listens for alice; heralds to bob)...")
+    rep_thread = switch.execute_thread(
+        f"{runner} --role repeater --name station --host 0.0.0.0 --seed 3 "
+        f"--bob-host {bob_data_ip} "
+        f"{common} 2>&1 | tee /tmp/rep_station.log")
+    time.sleep(8)
+
+    print("  Starting Alice (register host)...")
+    alice_thread = alice.execute_thread(
+        f"{runner} --role alice --name alice --seed 1 "
+        f"--host {bob_data_ip} --bob-host {bob_data_ip} "
+        f"--repeater-host {station_ip} "
+        f"{common} 2>&1 | tee /tmp/rep_alice.log")
+
+    print("  Waiting for the chain to complete...")
+    a_out = alice_thread.result()
+    time.sleep(5)
+    outs = {"alice": a_out}
+    for who, th in (("bob", bob_thread), ("repeater", rep_thread)):
+        try:
+            outs[who] = th.result()
+        except Exception as e:
+            outs[who] = ("", str(e))
+
+    def _parse(out):
+        for line in reversed(str(out[0]).splitlines()):
+            line = line.strip()
+            if line.startswith("{") and '"role"' in line:
+                try:
+                    return _json.loads(line)
+                except _json.JSONDecodeError:
+                    pass
+        return None
+
+    res = {who: _parse(out) for who, out in outs.items()}
+
+    results_dir = PROJECT_DIR / "results"
+    results_dir.mkdir(exist_ok=True)
+    for who, r in res.items():
+        if r:
+            (results_dir / f"fabric_repeater_{who}.json").write_text(
+                _json.dumps(r, indent=2))
+
+    print(f"\n=== Distributed Repeater Results ({chain_mode}) ===")
+    a_res, b_res, m_res = res["alice"], res["bob"], res["repeater"]
+    for who, r in (("alice", a_res), ("bob", b_res)):
+        if r:
+            print(f"  [{who}] delivered={r.get('delivered')}/{r.get('attempts')} "
+                  f"qber={r.get('qber')} (pred {r.get('qber_pred'):.4f}) "
+                  f"CHSH_S={r.get('chsh_s')} (pred {r.get('chsh_pred'):.3f}) "
+                  f"reconciled={r.get('reconciled')} "
+                  f"secure_key_bits={r.get('secure_key_bits')} "
+                  f"key={'yes' if r.get('key') is not None else 'no'}")
+        else:
+            print(f"  [{who}] no JSON result — check /tmp/rep_{who}.log on the node")
+    if m_res:
+        print(f"  [station] swaps={m_res.get('swaps')} heralds={m_res.get('heralds')} "
+              f"tx={m_res.get('tx_frames')} rx={m_res.get('rx_frames')}")
+    else:
+        print("  [station] no JSON result — check /tmp/rep_station.log on the switch")
+    if a_res and b_res and a_res.get("key") is not None:
+        print(f"  keys match bit-for-bit: {a_res['key'] == b_res['key']}")
+    return a_res, b_res, m_res
 
 
 def cleanup(fablib, slice_name: str):
