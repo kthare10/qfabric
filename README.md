@@ -64,16 +64,18 @@ The notebooks form a single linear workflow. Start at `00_overview`:
 | 9 | `09_entanglement_e91` | Entanglement-based QKD (**E91 / BBM92**) distributed over 2 nodes; CHSH Bell test | Anywhere (loopback) / FABRIC |
 | 10 | `10_eavesdropper` | Intercept-resend attack: QBER & secure-key-rate vs Eve's tap fraction, the ~11% threshold | Anywhere (local) |
 | 11 | `11_reconciliation` | Cascade reconciliation: raw keys → identical secret key; leakage & the abort-above-threshold behavior | Anywhere (loopback) |
+| 12 | `12_repeater` | **Entanglement swapping / repeater chains**: Werner-chain law, CHSH vs hops, heralded-correction control, then the chain across 3 processes | Anywhere (loopback) |
+| 13 | `13_qkd_security` | Security depth: **finite-key** bounds, **authenticated** classical channel, **biased-basis** BB84, **live decoy-state** analysis | Anywhere (loopback) |
 
 The numbers are the **FABRIC deployment order** (0→6 is the linear slice workflow). For
 learning or for slice-free work, read by track instead:
 
 - **Deploy on FABRIC:** 0 → 1 → 2 → 3 → 4 → 6
-- **Learn QKD (local, no slice):** 2 (BB84) → 10 (eavesdropper / why it's secure) → 11 (reconciliation → a real shared key) → *decoy* (`scripts/decoy_sweep.py`; a notebook is a good first contribution)
+- **Learn QKD (local, no slice):** 2 (BB84) → 10 (eavesdropper / why it's secure) → 11 (reconciliation → a real shared key) → 13 (finite keys, authentication, biased bases, live decoy)
 - **Simulator cross-checks:** 3, 7, 8
-- **Entanglement:** 9
+- **Entanglement:** 9 (E91 over 2 nodes) → 12 (swapping / repeater chains over 3)
 
-> Notebooks 1–2 provision and drive a FABRIC slice (BMv2 is installed on the switch node automatically). Notebooks 0, 4, 8, 9, 10 run **anywhere** (including a laptop) — 4 works standalone on bundled sample results; 8/9/10 run slice-free over loopback / in-process.
+> Notebooks 1–2 provision and drive a FABRIC slice (BMv2 is installed on the switch node automatically). Notebooks 0, 4, 8–13 run **anywhere** (including a laptop) — 4 works standalone on bundled sample results; the rest run slice-free over loopback / in-process.
 
 ### Prerequisites
 

@@ -76,3 +76,4 @@ p4/tna/build/
 
 # Vagrant
 .vagrant/
+.venv-*/
