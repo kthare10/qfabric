@@ -48,6 +48,16 @@ def _rot_meas_unitary(theta: float) -> np.ndarray:
     return np.array([[c, s], [-s, c]], dtype=complex)
 
 
+_PAULI_X = np.array([[0, 1], [1, 0]], dtype=complex)
+_PAULI_Z = np.array([[1, 0], [0, -1]], dtype=complex)
+_HADAMARD = np.array([[1, 1], [1, -1]], dtype=complex) * _INV_SQRT2
+# CNOT over (control, target) in basis |00>|01>|10>|11>
+_CNOT = np.array([[1, 0, 0, 0],
+                  [0, 1, 0, 0],
+                  [0, 0, 0, 1],
+                  [0, 0, 1, 0]], dtype=complex)
+
+
 class _Group:
     """A pure joint state over an ordered list of qubit ids."""
 
@@ -88,6 +98,58 @@ class QStateRegister:
         self._groups[a] = g
         self._groups[b] = g
         return a, b
+
+    # -- gates (repeater support) ------------------------------------------------
+
+    def apply_pauli(self, qubit_id: int, x: int = 0, z: int = 0) -> None:
+        """Apply X^x·Z^z to one qubit — the heralded correction after a swap."""
+        if qubit_id not in self._groups:
+            raise KeyError(f"unknown/at-rest qubit id {qubit_id}")
+        if not (x or z):
+            return
+        u = np.eye(2, dtype=complex)
+        if z:
+            u = _PAULI_Z @ u
+        if x:
+            u = _PAULI_X @ u
+        g = self._groups[qubit_id]
+        g.amp = self._apply_1q(g.amp, u, g.ids.index(qubit_id), len(g.ids))
+
+    def _merge(self, q1: int, q2: int) -> _Group:
+        """Join the groups of two qubits into one product state (no-op if shared)."""
+        g1, g2 = self._groups[q1], self._groups[q2]
+        if g1 is g2:
+            return g1
+        merged = _Group(g1.ids + g2.ids, np.kron(g1.amp, g2.amp))
+        for q in merged.ids:
+            self._groups[q] = merged
+        return merged
+
+    def bell_measure(self, q1: int, q2: int,
+                     samp1: float | None = None,
+                     samp2: float | None = None) -> tuple[int, int]:
+        """Bell-state measurement on two qubits — the repeater *swap* operation.
+
+        Standard analyzer circuit: CNOT(q1→q2), H(q1), then measure both in Z.
+        Returns the herald bits (m1, m2) identifying the Bell state:
+            Φ+ → (0,0)   Φ− → (1,0)   Ψ+ → (0,1)   Ψ− → (1,1)
+        Both qubits are consumed; any partners they were entangled with stay in
+        the register, now joined in one group. Swapping A–B1 with B2–C via a BSM
+        on (B1,B2) projects A–C onto the heralded Bell state — applying
+        X^m2·Z^m1 to either survivor restores Φ+.
+        """
+        if q1 == q2:
+            raise ValueError("bell_measure needs two distinct qubits")
+        for q in (q1, q2):
+            if q not in self._groups:
+                raise KeyError(f"unknown/at-rest qubit id {q}")
+        g = self._merge(q1, q2)
+        i, j, n = g.ids.index(q1), g.ids.index(q2), len(g.ids)
+        amp = self._apply_2q(g.amp, _CNOT, i, j, n)
+        g.amp = self._apply_1q(amp, _HADAMARD, i, n)
+        m1 = self.measure(q1, 0.0, samp=samp1)
+        m2 = self.measure(q2, 0.0, samp=samp2)
+        return m1, m2
 
     # -- measurement -----------------------------------------------------------
 
@@ -139,6 +201,14 @@ class QStateRegister:
         t = amp.reshape([2] * n)
         t = np.tensordot(u, t, axes=([1], [idx]))
         return np.moveaxis(t, 0, idx).reshape(-1)
+
+    @staticmethod
+    def _apply_2q(amp: np.ndarray, u: np.ndarray, i: int, j: int, n: int) -> np.ndarray:
+        """Apply a 4x4 unitary over qubits (i, j) of an n-qubit amplitude vector."""
+        t = amp.reshape([2] * n)
+        u4 = u.reshape(2, 2, 2, 2)          # (out_i, out_j, in_i, in_j)
+        t = np.tensordot(u4, t, axes=([2, 3], [i, j]))
+        return np.moveaxis(t, [0, 1], [i, j]).reshape(-1)
 
     @staticmethod
     def _bit_mask(idx: int, n: int, want: int) -> np.ndarray:

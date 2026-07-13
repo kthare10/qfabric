@@ -59,6 +59,20 @@ class QuantumStateService:
         """Measure many (qubit_id, angle) pairs in order; return the outcomes."""
         return [self.measure(qid, ang) for qid, ang in requests]
 
+    def bell_measure(self, q1: int, q2: int) -> tuple[int, int]:
+        """Entanglement swap: BSM on two qubits; returns the (m1, m2) herald bits.
+
+        A repeater station holding one half of each adjacent link calls this; the
+        herald travels classically to an end node, which applies the correction.
+        """
+        return self.register.bell_measure(q1, q2,
+                                          samp1=float(self._samp_rng.random()),
+                                          samp2=float(self._samp_rng.random()))
+
+    def apply_correction(self, qubit_id: int, x: int, z: int) -> None:
+        """Apply the heralded Pauli correction X^x·Z^z (restores Φ+ after swaps)."""
+        self.register.apply_pauli(qubit_id, x=x, z=z)
+
     def drop(self, qubit_id: int) -> None:
         """Discard a lost qubit's state so its group can be garbage-collected."""
         g = self.register._groups.pop(qubit_id, None)
