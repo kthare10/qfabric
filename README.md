@@ -4,7 +4,7 @@ QFabric is a programmable quantum network emulation platform built on the [FABRI
 
 The core idea: pure quantum-network simulators (NetSquid, SeQUeNCe) assume an *ideal* classical control channel. QFabric runs the classical sifting traffic over a **real WAN** on FABRIC, so genuine latency, jitter, and congestion enter the protocol naturally — letting us measure how classical-network conditions affect quantum-protocol performance.
 
-See [`SPEC.md`](SPEC.md) for the design and wire formats, and [`ROADMAP.md`](ROADMAP.md) for what's done and what's next.
+New to quantum networking? Start with [`PRIMER.md`](PRIMER.md) — **the concepts from zero, no code, no prior physics** — then [`CONCEPTS.md`](CONCEPTS.md), which maps every concept to the code that implements it. See [`SPEC.md`](SPEC.md) for the design and wire formats, and [`ROADMAP.md`](ROADMAP.md) for what's done and what's next.
 
 ## Get the code
 
