@@ -64,7 +64,16 @@ def get_fablib():
 
 
 def create_slice(fablib, slice_name: str, site_alice: str, site_bob: str, site_switch: str):
-    """Provision a 3-node FABRIC slice with L2 networks."""
+    """Provision a 3-node FABRIC slice with L2 networks.
+
+    Default topology is SINGLE-SITE (all three nodes on one site): a photon
+    cannot physically cross a WAN-scale span, so the quantum link must live on
+    site-local L2 (sub-ms, ~the "near-zero classical network" of real QKD) and
+    distance is EMULATED — the P4 loss threshold and `--channel-delay auto`
+    both derive from the same distance_km knob. Pass a different site for Bob
+    only for classical-plane stress experiments (explicitly not a realistic
+    quantum-channel topology; 2026-07-15 review).
+    """
     print(f"\n=== Creating slice '{slice_name}' ===")
     print(f"  Alice:  {site_alice}")
     print(f"  Switch: {site_switch}")
@@ -1098,7 +1107,7 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
                       auth_key=None, finite_key=False, basis_bias=0.5,
                       dead_time=0.0, timing_jitter=0.0, pulse_period_ns=0.0,
                       decoy=False, mu_signal=0.6, mu_decoy=0.1, mu_vacuum=0.001,
-                      decoy_probs="0.7,0.2,0.1"):
+                      decoy_probs="0.7,0.2,0.1", channel_delay="auto"):
     """Run distributed-SeQUeNCe BB84 across the slice (raw 0x7101 photons via P4).
 
     Runs real SeQUeNCe QKDNode/BB84 instances (via `qne_sequence.node_runner`) on
@@ -1160,6 +1169,7 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
               f"{'--reconcile' if reconcile else '--no-reconcile'} "
               f"--basis-bias {basis_bias} --dead-time {dead_time} "
               f"--timing-jitter {timing_jitter} --pulse-period-ns {pulse_period_ns} "
+              f"--channel-delay {channel_delay} "
               f"--port {port}")
     if auth_key:
         common += f" --auth-key {auth_key}"
@@ -1332,14 +1342,20 @@ def run_sequence_repeater(slice_obj, *, num_pairs=20000, fidelity=0.95,
                           port=5100, station_ip="10.10.1.3",
                           bob_data_ip="10.10.1.2", venv=".venv-qne",
                           auth_key=None, finite_key=False,
-                          apply_correction=True):
-    """Run the entanglement-swapping repeater chain across the slice — 3 nodes.
+                          apply_correction=True, num_stations=1,
+                          channel_delay="auto"):
+    """Run the entanglement-swapping repeater chain across the slice.
 
-    The repeater STATION runs on the switch node, physically between the
-    endpoints, so all three classical links traverse real FABRIC segments:
+    The repeater STATION(s) run on the switch node, physically between the
+    endpoints, so the classical links traverse real FABRIC segments:
     alice<->station (swap plan + BSM RPCs), station->bob (the HERALDS — the
     multi-hop latency lever), and alice<->bob (sift/QBER/CHSH + Cascade+PA,
     kernel-forwarded through the station).
+
+    ``num_stations`` > 1 runs a longer chain (K stations -> K+2 nodes, K+1
+    links) with the extra station processes CO-LOCATED on the switch node —
+    real processes and real herald links, one shared middle host. Chains with
+    stations on distinct sites need a bigger slice topology.
 
     ``chain_mode``: 'bbm92' (Z/X key) or 'e91' (adds the CHSH Bell test across
     the swapped chain). ``distance_km``/``attenuation`` set the per-LINK pair
@@ -1347,7 +1363,8 @@ def run_sequence_repeater(slice_obj, *, num_pairs=20000, fidelity=0.95,
     (replaces BMv2 with the station bridge), and
     setup_sequence_runtime(slice, nodes=("alice", "bob", "switch")).
 
-    Returns (alice_result, bob_result, repeater_result) dicts.
+    Returns (alice_result, bob_result, repeater_results) — the last is a list
+    with one entry per station.
     """
     import json as _json
 
@@ -1357,9 +1374,9 @@ def run_sequence_repeater(slice_obj, *, num_pairs=20000, fidelity=0.95,
     port_ar, port_rb = port + 1, port + 2
 
     print(f"\n=== Running distributed repeater chain ({chain_mode}, "
-          f"station on switch node) ===")
-    print(f"  links: alice->{station_ip}:{port_ar} (BSM), "
-          f"station->{bob_data_ip}:{port_rb} (heralds), "
+          f"{num_stations} station(s) on switch node) ===")
+    print(f"  links: alice->{station_ip}:{port_ar}.. (BSM), "
+          f"station(s)->{bob_data_ip}:{port_rb}.. (heralds), "
           f"alice->{bob_data_ip}:{port} (QKD tail)")
     print(f"  pairs={num_pairs} F={fidelity} per-link dist={distance_km}km "
           f"atten={attenuation}dB/km sample_frac={sample_fraction}")
@@ -1375,6 +1392,8 @@ def run_sequence_repeater(slice_obj, *, num_pairs=20000, fidelity=0.95,
               f"--cascade-passes {cascade_passes} "
               f"{'--reconcile' if reconcile else '--no-reconcile'} "
               f"{'' if apply_correction else '--no-correction '}"
+              f"--num-stations {num_stations} "
+              f"--channel-delay {channel_delay} "
               f"--port {port} --port-ar {port_ar} --port-rb {port_rb}")
     if auth_key:
         common += f" --auth-key {auth_key}"
@@ -1384,17 +1403,19 @@ def run_sequence_repeater(slice_obj, *, num_pairs=20000, fidelity=0.95,
     runner = (f"cd ~/qfabric/qne-sequence && env PYTHONPATH=$HOME/qfabric "
               f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner")
 
-    print("  Starting Bob (listens for alice + station)...")
+    print("  Starting Bob (listens for alice + stations)...")
     bob_thread = bob.execute_thread(
         f"{runner} --role bob --name bob --host 0.0.0.0 --seed 2 "
         f"{common} 2>&1 | tee /tmp/rep_bob.log")
     time.sleep(8)
 
-    print("  Starting repeater station (listens for alice; heralds to bob)...")
-    rep_thread = switch.execute_thread(
-        f"{runner} --role repeater --name station --host 0.0.0.0 --seed 3 "
-        f"--bob-host {bob_data_ip} "
-        f"{common} 2>&1 | tee /tmp/rep_station.log")
+    print(f"  Starting {num_stations} repeater station(s) on the switch node...")
+    station_cmds = " & ".join(
+        f"{runner} --role repeater --name station{i} --station-index {i} "
+        f"--host 0.0.0.0 --seed {2 + i} --bob-host {bob_data_ip} "
+        f"{common} > /tmp/rep_station{i}.log 2>&1"
+        for i in range(1, num_stations + 1))
+    rep_thread = switch.execute_thread(f"{station_cmds} & wait")
     time.sleep(8)
 
     print("  Starting Alice (register host)...")
@@ -1408,14 +1429,14 @@ def run_sequence_repeater(slice_obj, *, num_pairs=20000, fidelity=0.95,
     a_out = alice_thread.result()
     time.sleep(5)
     outs = {"alice": a_out}
-    for who, th in (("bob", bob_thread), ("repeater", rep_thread)):
+    for who, th in (("bob", bob_thread), ("stations", rep_thread)):
         try:
             outs[who] = th.result()
         except Exception as e:
             outs[who] = ("", str(e))
 
-    def _parse(out):
-        for line in reversed(str(out[0]).splitlines()):
+    def _parse(text):
+        for line in reversed(str(text).splitlines()):
             line = line.strip()
             if line.startswith("{") and '"role"' in line:
                 try:
@@ -1424,17 +1445,29 @@ def run_sequence_repeater(slice_obj, *, num_pairs=20000, fidelity=0.95,
                     pass
         return None
 
-    res = {who: _parse(out) for who, out in outs.items()}
+    a_res = _parse(outs["alice"][0])
+    b_res = _parse(outs["bob"][0])
+    # station outputs went to per-station log files (they ran backgrounded)
+    m_res = []
+    for i in range(1, num_stations + 1):
+        log, _ = switch.execute(f"tail -1 /tmp/rep_station{i}.log", quiet=True)
+        r = _parse(log)
+        if r:
+            m_res.append(r)
 
     results_dir = PROJECT_DIR / "results"
     results_dir.mkdir(exist_ok=True)
-    for who, r in res.items():
-        if r:
-            (results_dir / f"fabric_repeater_{who}.json").write_text(
-                _json.dumps(r, indent=2))
+    if a_res:
+        (results_dir / "fabric_repeater_alice.json").write_text(_json.dumps(a_res, indent=2))
+    if b_res:
+        (results_dir / "fabric_repeater_bob.json").write_text(_json.dumps(b_res, indent=2))
+    for r in m_res:
+        idx = r.get("station_index", 1)
+        (results_dir / f"fabric_repeater_station{idx}.json").write_text(
+            _json.dumps(r, indent=2))
 
-    print(f"\n=== Distributed Repeater Results ({chain_mode}) ===")
-    a_res, b_res, m_res = res["alice"], res["bob"], res["repeater"]
+    print(f"\n=== Distributed Repeater Results ({chain_mode}, "
+          f"{num_stations + 2} nodes / {num_stations + 1} links) ===")
     for who, r in (("alice", a_res), ("bob", b_res)):
         if r:
             print(f"  [{who}] delivered={r.get('delivered')}/{r.get('attempts')} "
@@ -1445,11 +1478,12 @@ def run_sequence_repeater(slice_obj, *, num_pairs=20000, fidelity=0.95,
                   f"key={'yes' if r.get('key') is not None else 'no'}")
         else:
             print(f"  [{who}] no JSON result — check /tmp/rep_{who}.log on the node")
-    if m_res:
-        print(f"  [station] swaps={m_res.get('swaps')} heralds={m_res.get('heralds')} "
-              f"tx={m_res.get('tx_frames')} rx={m_res.get('rx_frames')}")
-    else:
-        print("  [station] no JSON result — check /tmp/rep_station.log on the switch")
+    for r in m_res:
+        print(f"  [station{r.get('station_index')}] swaps={r.get('swaps')} "
+              f"heralds={r.get('heralds')} tx={r.get('tx_frames')} rx={r.get('rx_frames')}")
+    if len(m_res) < num_stations:
+        print(f"  WARNING: only {len(m_res)}/{num_stations} station results — "
+              "check /tmp/rep_station*.log on the switch")
     if a_res and b_res and a_res.get("key") is not None:
         print(f"  keys match bit-for-bit: {a_res['key'] == b_res['key']}")
     return a_res, b_res, m_res
@@ -1474,7 +1508,10 @@ def main():
     )
     parser.add_argument("--slice-name", default="qfabric-bb84", help="FABRIC slice name")
     parser.add_argument("--site-alice", default="TACC", help="FABRIC site for Alice")
-    parser.add_argument("--site-bob", default="STAR", help="FABRIC site for Bob")
+    parser.add_argument("--site-bob", default="TACC",
+                        help="FABRIC site for Bob (default: same site as Alice — "
+                             "single-site slice, distance is emulated; pick a "
+                             "remote site only for classical stress runs)")
     parser.add_argument("--site-switch", default="TACC", help="FABRIC site for BMv2 switch")
     parser.add_argument("--cleanup", action="store_true", help="Delete the slice and exit")
     parser.add_argument("--skip-provision", action="store_true",
