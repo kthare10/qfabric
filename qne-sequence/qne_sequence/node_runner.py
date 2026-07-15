@@ -47,6 +47,20 @@ def loss_probability(distance_km: float, attenuation_db_per_km: float) -> float:
     return 1.0 - 10 ** (-(attenuation_db_per_km * distance_km) / 10.0)
 
 
+# Classical propagation in fiber: c / n (n = 1.468) ~ 204,000 km/s ~ 4.9 us/km.
+PS_PER_KM = 4_900_000
+
+
+def propagation_delay_ps(distance_km: float) -> int:
+    """One-way classical propagation delay over the SAME fiber distance (ps).
+
+    The unified distance knob: `--channel-delay auto` derives the classical
+    delay from the same L that drives quantum loss, so one distance yields a
+    coherent channel model (loss AND latency) instead of two free knobs.
+    """
+    return int(distance_km * PS_PER_KM)
+
+
 def run_node(role_name: str, name: str, peer: str, host: str, port: int,
              key_length: int, key_num: int, seed: int, time_scale: float,
              channel_delay: int, distance_km: float, attenuation: float,
@@ -137,7 +151,24 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         link.serve(host, port)
     else:
         link.connect(host, port)
-    node.cchannels[peer] = RemoteClassicalChannel(link, delay=channel_delay)
+
+    # One shared sim-time origin: Bob is the time master, Alice adopts his epoch
+    # corrected by a Cristian offset estimate (timesync.py). This is what lets
+    # the lookahead scheduler deliver frames at exactly t_send + channel_delay —
+    # the simulator's event time — with no PTP / synchronized wall clocks.
+    from .timesync import request_epoch, serve_epoch
+    if role == 1:
+        epoch_ns = time_ns()
+        peer_offset_ns, rtt_ns = serve_epoch(link, epoch_ns)
+        timesync_info = {"role": "master", "offset_ns": peer_offset_ns,
+                         "rtt_ns": rtt_ns}
+    else:
+        epoch_ns, peer_offset_ns, rtt_ns = request_epoch(link)
+        timesync_info = {"role": "client", "offset_ns": peer_offset_ns,
+                         "rtt_ns": rtt_ns}
+
+    node.cchannels[peer] = RemoteClassicalChannel(link, delay=channel_delay,
+                                                  timeline=tl)
 
     # Software drop applied by the channel: only when loss_where == 'model'.
     # 'none' -> 0 (lossless); 'switch' -> 0 here (the P4 switch drops downstream).
@@ -160,7 +191,8 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
     else:
         # descriptor-on-wire over the shared TCP link (no switch); software loss
         node.qchannels[peer] = RemoteQuantumChannel(link, delay=channel_delay,
-                                                    loss_probability=sw_loss, seed=seed + 2)
+                                                    loss_probability=sw_loss, seed=seed + 2,
+                                                    timeline=tl)
         listener = Listener(tl, node, dbb, delay=channel_delay)
 
     link.on_frame = listener.on_frame
@@ -168,8 +200,9 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
 
     tl.init()
 
-    # shared epoch so both sides agree on wall<->sim mapping
-    tl.set_epoch(time_ns())
+    # the epoch negotiated in the handshake above — both timelines now agree on
+    # the wall<->sim mapping to within ~RTT/2
+    tl.set_epoch(epoch_ns)
 
     if role == 0:  # Alice kicks off after the start barrier
         tl.schedule(Event(tl.now() + _START_BARRIER_PS,
@@ -189,6 +222,7 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
 
     reconciled = False
     corrections = bits_leaked = 0
+    rpc = None
     sift_key = list(getattr(dbb, "key_bits", None) or [])   # aligned key on both sides
     final_key = sift_key                                    # unamplified fallback
     qber = dbb.metrics.get("qber", 0.0)
@@ -196,7 +230,10 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
     # effort reconciling. Both sides see the same QBER, so they agree (no deadlock).
     secure_ok = dbb.metrics.get("secure_fraction", 0.0) > 0
     if do_reconcile and sift_key and secure_ok:
-        rpc = RpcChannel(link)   # rebinds link.on_frame to a buffered queue
+        # rebinds link.on_frame to a buffered queue; Cascade traffic is classical
+        # channel traffic, so it gets the same lookahead pacing as the protocol
+        rpc = RpcChannel(link, delay_ps=channel_delay,
+                         peer_offset_ns=peer_offset_ns)
         finite = ({"n_sample": int(result.get("num_sampled") or 0),
                    "eps_sec": eps_sec, "eps_cor": eps_cor} if finite_key else None)
         if role == 1:            # Bob drives Cascade + announces the PA hash
@@ -260,6 +297,20 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         "authenticated": auth_key is not None,
         "auth_failures": link.auth_failures,
         "remote_access_errors": len(tl.remote_access_errors),
+        # emulation-fidelity certificate: with channel_delay > 0, every frame
+        # should fire at exactly t_send + delay (late_events == 0 means the
+        # run executed the simulator's event schedule). Counts cover both the
+        # timeline phase (listener) and the Cascade RPC phase.
+        "channel_delay_ps": channel_delay,
+        "timesync": timesync_info,
+        "lookahead": {
+            "on_time_events": listener.on_time_events
+                              + (rpc.on_time_events if rpc else 0),
+            "late_events": listener.late_events
+                           + (rpc.late_events if rpc else 0),
+            "max_lateness_ps": max(listener.max_lateness_ps,
+                                   (rpc.max_lateness_ns * 1000) if rpc else 0),
+        },
     }
 
 
@@ -293,6 +344,17 @@ def main(argv=None) -> int:
     ap.add_argument("--repeater-host", default=None,
                     help="repeater protocol: address where the repeater "
                          "station's listener is reached (default: --host)")
+    ap.add_argument("--num-stations", type=int, default=1,
+                    help="repeater protocol: number of repeater stations K "
+                         "(chain has K+2 nodes, K+1 links; station i listens on "
+                         "port+2i-1, bob listens for it on port+2i)")
+    ap.add_argument("--station-index", type=int, default=1,
+                    help="repeater protocol, --role repeater: which station this "
+                         "process is (1-based)")
+    ap.add_argument("--repeater-hosts", default=None,
+                    help="repeater protocol, --role alice: comma-separated list "
+                         "of the K station addresses (default: --repeater-host "
+                         "or --host for all)")
     ap.add_argument("--reconcile", action=argparse.BooleanOptionalAction, default=True,
                     help="run Cascade error reconciliation so both keys match "
                          "bit-for-bit (--no-reconcile to skip)")
@@ -340,8 +402,16 @@ def main(argv=None) -> int:
     ap.add_argument("--key-num", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--time-scale", type=float, default=1.0)
-    ap.add_argument("--channel-delay", type=int, default=0,
-                    help="modeled extra delay in ps on top of real wire latency")
+    ap.add_argument("--channel-delay", default="0",
+                    help="modeled one-way channel delay in ps, or 'auto' to "
+                         "derive it from --distance-km (~4.9e6 ps per km — the "
+                         "unified distance knob: one L drives loss AND delay). "
+                         "When > 0, every classical message is delivered at "
+                         "exactly t_send + delay in shared clock terms "
+                         "(lookahead mode — matches the simulator's schedule "
+                         "as long as real latency stays below it; late frames "
+                         "are counted in the result). 0 = legacy: deliver at "
+                         "real arrival time.")
     # physics (defaults are ideal: lossless, perfect detector — preserves Phase A)
     ap.add_argument("--distance-km", type=float, default=0.0)
     ap.add_argument("--attenuation", type=float, default=0.0,
@@ -383,6 +453,9 @@ def main(argv=None) -> int:
     if args.protocol != "repeater" and not args.peer:
         ap.error("--peer is required for the two-party protocols")
 
+    channel_delay = (propagation_delay_ps(args.distance_km)
+                     if args.channel_delay == "auto" else int(args.channel_delay))
+
     if args.protocol == "repeater":
         from .distributed_repeater import ROLES as _ROLES3
         from .distributed_repeater import run_repeater_node
@@ -393,6 +466,7 @@ def main(argv=None) -> int:
             port_ab=args.port,
             port_ar=args.port_ar or args.port + 1,
             port_rb=args.port_rb or args.port + 2,
+            num_stations=args.num_stations, station_index=args.station_index,
             num_pairs=args.num_pairs, fidelity=args.fidelity,
             loss_probability=loss_p, mode=args.chain_mode,
             sample_fraction=args.sample_fraction, seed=args.seed,
@@ -400,7 +474,10 @@ def main(argv=None) -> int:
             finite_key=args.finite_key, eps_sec=args.eps_sec,
             eps_cor=args.eps_cor, auth_key=args.auth_key,
             apply_correction=args.correction,
-            bob_host=args.bob_host, repeater_host=args.repeater_host)
+            bob_host=args.bob_host, repeater_host=args.repeater_host,
+            repeater_hosts=(args.repeater_hosts.split(",")
+                            if args.repeater_hosts else None),
+            channel_delay=channel_delay)
         print(json.dumps(result))
         return 0
 
@@ -415,13 +492,13 @@ def main(argv=None) -> int:
             sample_fraction=args.sample_fraction, seed=args.seed,
             do_reconcile=args.reconcile, cascade_passes=args.cascade_passes,
             finite_key=args.finite_key, eps_sec=args.eps_sec, eps_cor=args.eps_cor,
-            auth_key=args.auth_key)
+            auth_key=args.auth_key, channel_delay=channel_delay)
         print(json.dumps(result))
         return 0
 
     result = run_node(args.role, args.name, args.peer, args.host, args.port,
                       args.key_length, args.key_num, args.seed, args.time_scale,
-                      args.channel_delay, args.distance_km, args.attenuation,
+                      channel_delay, args.distance_km, args.attenuation,
                       args.fidelity, args.efficiency, args.dark_count_rate,
                       args.sample_fraction, args.num_pulses or None, args.photon_mode,
                       args.quantum_transport, args.photon_iface, args.src_mac,

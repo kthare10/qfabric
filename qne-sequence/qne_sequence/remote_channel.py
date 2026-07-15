@@ -27,9 +27,12 @@ class RemoteClassicalChannel:
         cchannels[dst].transmit(msg, source, priority, sender_delay)
     """
 
-    def __init__(self, link, delay: int = 0):
+    def __init__(self, link, delay: int = 0, timeline=None):
         self.link = link
         self.delay = delay  # modeled fiber delay (ps); read by BB84.start_protocol
+        # with a timeline, frames carry t_send so the receiver can deliver at
+        # exactly t_send + delay (lookahead mode; see listener.Listener)
+        self.timeline = timeline
 
     def transmit(self, msg, source, priority, sender_delay: int = 0) -> None:
         frame = WireCodec.encode(
@@ -38,6 +41,7 @@ class RemoteClassicalChannel:
             receiver=msg.receiver,
             msg_type=msg.msg_type,
             payload=getattr(msg, "payload", {}) or {},
+            t_send=self.timeline.now() if self.timeline is not None else None,
         )
         self.link.send(frame)
 
@@ -59,11 +63,12 @@ class RemoteQuantumChannel:
     """
 
     def __init__(self, link, delay: int = 0, loss_probability: float = 0.0,
-                 seed: int = 0):
+                 seed: int = 0, timeline=None):
         self.link = link
         self.delay = delay
         self.loss_probability = loss_probability
         self._rng = numpy.random.default_rng(seed)
+        self.timeline = timeline  # for t_send stamping (lookahead delivery)
 
     def transmit_batch(self, src_name: str, receiver_proto: str, pulses: list) -> None:
         # pulses: list of [seq, basis, bit]; drop each independently (fiber loss)
@@ -89,5 +94,6 @@ class RemoteQuantumChannel:
             receiver=receiver_proto,
             msg_type="QUBITS",
             payload={"pulses": pulses},
+            t_send=self.timeline.now() if self.timeline is not None else None,
         )
         self.link.send(frame)

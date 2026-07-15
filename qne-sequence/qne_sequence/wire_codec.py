@@ -10,8 +10,14 @@ link, distinguished by ``kind``:
       "src":      "<source node name>",
       "receiver": "<destination protocol name>",   # == msg.receiver
       "msg_type": "BEGIN_PHOTON_PULSE" | ... | "QUBITS",
-      "payload":  { ... }                           # type-specific fields
+      "payload":  { ... },                          # type-specific fields
+      "t_send":   <sender sim-time in ps>           # optional; lookahead delivery
     }
+
+``t_send`` is the sender's simulation clock at transmit. With a shared epoch
+(timesync.py) the receiver can deliver at exactly ``t_send + modeled_delay`` —
+the same event time a pure simulator would use — instead of paying real wire
+latency *plus* the modeled delay (see listener.Listener).
 
 On decode of a classical frame we rebuild a WireMessage, which Node.receive_message
 routes to the matching protocol exactly as in-process (routing is by msg.receiver).
@@ -45,17 +51,18 @@ class WireCodec:
     """
 
     @staticmethod
-    def encode(kind: str, src: str, receiver: str, msg_type: str, payload: dict) -> bytes:
-        return json.dumps(
-            {
-                "kind": kind,
-                "src": src,
-                "receiver": receiver,
-                "msg_type": msg_type,
-                "payload": payload,
-            },
-            separators=(",", ":"),
-        ).encode("utf-8")
+    def encode(kind: str, src: str, receiver: str, msg_type: str, payload: dict,
+               t_send: int | None = None) -> bytes:
+        envelope = {
+            "kind": kind,
+            "src": src,
+            "receiver": receiver,
+            "msg_type": msg_type,
+            "payload": payload,
+        }
+        if t_send is not None:
+            envelope["t_send"] = int(t_send)
+        return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
 
     @staticmethod
     def decode(data: bytes) -> dict:

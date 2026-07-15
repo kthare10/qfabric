@@ -1,33 +1,43 @@
-"""Distributed repeater chain — entanglement swapping across THREE processes.
+"""Distributed repeater chain — entanglement swapping across N processes.
 
 This distributes the heralding of ``repeater.py`` (the in-process chain) over real
-links, completing the "prove in-process, then distribute" path used for E91:
+links, completing the "prove in-process, then distribute" path used for E91. The
+chain has ``K = num_stations`` repeater stations between the endpoints, so
+``N = K + 2`` processes and ``L = K + 1`` elementary links:
 
   * **alice** (role 0) hosts the QuantumStateService — the register authority —
-    and generates both elementary link pairs per attempt: (a1,b1) for link A–R
-    and (a2,b2) for link R–B. She measures her end (a1) locally and serves the
-    other parties' quantum ops over the wire.
-  * **repeater** (role 2) holds the two middle halves (b1, a2). It performs the
-    Bell-state measurements as a batched RPC against the register (BSM_REQ), then
-    forwards the (m1, m2) herald bits to Bob over its OWN link — the classical
-    herald traffic whose latency is the multi-hop research lever.
-  * **bob** (role 1) receives the heralds, applies the Pauli correction
-    X^m2·Z^m1 to his half (b2) via RPC, measures it, then runs the standard
-    sift / QBER-sample / CHSH disclosure and Cascade+PA against Alice.
+    and generates all L elementary link pairs per attempt. She measures her end
+    (a₁) locally and serves the other parties' quantum ops over the wire.
+  * **station i** (role 2, ``station_index = i``) holds the two middle halves of
+    its segment (b_i, a_{i+1}). It performs its Bell-state measurements as a
+    batched RPC against the register (BSM_REQ), then forwards its (m1, m2)
+    herald bits to Bob over its OWN link — the classical herald traffic whose
+    latency is the multi-hop research lever. A station neither knows nor cares
+    how many siblings it has; the station code is identical for any K.
+  * **bob** (role 1) receives one herald stream per station, composes the Pauli
+    correction per pair by XOR (X^x·Z^z with x = ⊕m2ᵢ, z = ⊕m1ᵢ — valid because
+    Pauli corrections compose by XOR), applies it to his half (b_L) via RPC,
+    measures, then runs the standard sift / QBER-sample / CHSH disclosure and
+    Cascade+PA against Alice.
 
-Three links (Bob listens for Alice and the repeater; the repeater listens for
-Alice): A↔R carries the swap plan + BSM ops; R↔B carries only heralds; A↔B
-carries the end-to-end QKD classical protocol. Only public data crosses any
-link: qubit ids, basis codes, heralds, the QBER sample, and Cascade parities.
+Links (2K+1 total): alice↔station_i carries the swap plan + BSM ops; station_i→bob
+carries only heralds; alice↔bob carries the end-to-end QKD classical protocol.
+Port scheme on top of ``port_ab``: station i listens for alice on
+``port_ab + 2i − 1`` and bob listens for station i on ``port_ab + 2i`` (for
+K = 1 this reduces to the original port+1 / port+2 layout). Only public data
+crosses any link: qubit ids, basis codes, heralds, the QBER sample, parities.
 
-Physics note: Alice measures her end *before* the swaps happen — delayed-choice
-entanglement swapping — so the end-to-end statistics still follow the Werner
-chain law F = (1 + 3·f^L)/4 (validated by the three-process tests). Skipping the
-correction (``--no-correction``) collapses QBER to 1/2: the herald link is
-load-bearing.
+Physics notes: Alice measures her end *before* the swaps happen (delayed-choice
+entanglement swapping), and the stations swap independently in any order (the
+BSMs commute; the register merges groups in whatever order ops arrive — Alice
+serializes them in station order for determinism). The end-to-end statistics
+follow the Werner chain law F = (1 + 3·f^L)/4. Skipping the correction
+(``--no-correction``) collapses QBER to 1/2: the herald channels are load-bearing.
 """
 
 from __future__ import annotations
+
+from time import sleep
 
 import numpy as np
 
@@ -40,13 +50,16 @@ from .quantum_state_service import QuantumStateService
 from .reconcile_link import bits_to_int, drive_cascade, serve_parities
 from .remote_qm import RpcChannel
 from .repeater import chain_chsh, chain_fidelity, chain_qber
+from .timesync import sync_link
 
 ROLES = {"alice": 0, "bob": 1, "repeater": 2}
-_NUM_LINKS = 2                      # 3 nodes -> 2 elementary links
+_SERVE_TIMEOUT = 60.0               # accept window per listener (K links come up serially)
 
 
 def run_repeater_node(role: int, name: str, host: str, *, port_ab: int,
-                      port_ar: int, port_rb: int, num_pairs: int = 5000,
+                      port_ar: int = 0, port_rb: int = 0,
+                      num_stations: int = 1, station_index: int = 1,
+                      num_pairs: int = 5000,
                       fidelity: float = 0.95, loss_probability: float = 0.0,
                       mode: str = "bbm92", sample_fraction: float = 0.1,
                       seed: int = 0, do_reconcile: bool = True,
@@ -55,60 +68,107 @@ def run_repeater_node(role: int, name: str, host: str, *, port_ab: int,
                       auth_key: str | None = None,
                       apply_correction: bool = True,
                       bob_host: str | None = None,
-                      repeater_host: str | None = None) -> dict:
-    """Run one node of the 3-process repeater chain; return its result dict.
+                      repeater_host: str | None = None,
+                      repeater_hosts: list[str] | None = None,
+                      channel_delay: int = 0) -> dict:
+    """Run one node of the N-process repeater chain; return its result dict.
 
-    Start order (like the 2-node runners, listeners first): bob, repeater, alice
-    — though ``Link.connect`` retries make the order forgiving. ``mode`` is
-    'bbm92' (Z/X key) or 'e91' (adds the CHSH test across the swapped chain).
-    ``loss_probability`` applies per LINK; an attempt whose links don't both
-    survive is never generated (heralded-generation retry, as in repeater.py).
+    Start order (listeners first): bob, stations, alice — though ``Link.connect``
+    retries make the order forgiving. ``mode`` is 'bbm92' (Z/X key) or 'e91'
+    (adds the CHSH test across the swapped chain). ``loss_probability`` applies
+    per LINK; an attempt whose links don't all survive is never generated.
 
-    ``host`` is this node's LISTEN address (loopback locally, 0.0.0.0 on a
-    slice). ``bob_host`` / ``repeater_host`` are where the OTHER parties are
-    reached — they default to ``host``, which is right on loopback where all
-    three share one address, and are set explicitly on FABRIC where each link
-    terminates on a different node.
+    Addressing: ``host`` is this node's LISTEN address. ``bob_host`` is where
+    bob's listeners are reached; ``repeater_hosts`` lists where each station's
+    listener is reached (one entry per station, alice-side); both default to
+    ``host`` (right on loopback). ``port_ar``/``port_rb`` override the derived
+    ports only for the single-station chain (kept for compatibility).
     """
     if mode not in _MODES:
         raise ValueError(f"unknown mode {mode!r} (use 'bbm92' or 'e91')")
+    if num_stations < 1:
+        raise ValueError("a repeater chain needs at least 1 station")
+    if not (1 <= station_index <= num_stations):
+        raise ValueError(f"station_index {station_index} outside 1..{num_stations}")
     bob_host = bob_host or host
-    repeater_host = repeater_host or host
+    if repeater_hosts is None:
+        repeater_hosts = [repeater_host or host] * num_stations
+    if len(repeater_hosts) != num_stations:
+        raise ValueError(f"repeater_hosts needs {num_stations} entries")
+
+    def _port_ar(i: int) -> int:
+        if num_stations == 1 and port_ar:
+            return port_ar
+        return port_ab + 2 * i - 1
+
+    def _port_rb(i: int) -> int:
+        if num_stations == 1 and port_rb:
+            return port_rb
+        return port_ab + 2 * i
+
     fk_eps = {"eps_sec": eps_sec, "eps_cor": eps_cor} if finite_key else None
     links: list[Link] = []
+    rpcs: list[RpcChannel] = []
+    syncs: list[dict] = []
+
+    def _paced_rpc(link: Link, serving: bool) -> RpcChannel:
+        # Per-link clock sync (before start_rx), then a lookahead-paced channel:
+        # every classical message on this link is delivered at t_send + delay.
+        offset_ns, rtt_ns = sync_link(link, serving=serving)
+        syncs.append({"offset_ns": offset_ns, "rtt_ns": rtt_ns})
+        rpc = RpcChannel(link, delay_ps=channel_delay, peer_offset_ns=offset_ns)
+        rpcs.append(rpc)
+        return rpc
+
     try:
         if role == ROLES["bob"]:
             ab = Link(auth_key=auth_key)
-            ab.serve(host, port_ab)
-            rb = Link(auth_key=auth_key)
-            rb.serve(host, port_rb)
-            links = [ab, rb]
-            rpc_a, rpc_r = RpcChannel(ab), RpcChannel(rb)
+            ab.serve(host, port_ab, timeout=_SERVE_TIMEOUT)
+            rpc_a = _paced_rpc(ab, serving=True)
             ab.start_rx()
-            rb.start_rx()
-            result = _run_bob(rpc_a, rpc_r, num_pairs, mode, sample_fraction,
-                              seed, do_reconcile, cascade_passes, fk_eps,
-                              apply_correction)
+            links = [ab]
+            rpc_stations = []
+            for i in range(1, num_stations + 1):
+                rb = Link(auth_key=auth_key)
+                rb.serve(host, _port_rb(i), timeout=_SERVE_TIMEOUT)
+                rpc_stations.append(_paced_rpc(rb, serving=True))
+                rb.start_rx()
+                links.append(rb)
+            result = _run_bob(rpc_a, rpc_stations, num_pairs, mode,
+                              sample_fraction, seed, do_reconcile,
+                              cascade_passes, fk_eps, apply_correction)
         elif role == ROLES["repeater"]:
             ar = Link(auth_key=auth_key)
-            ar.serve(host, port_ar)
+            ar.serve(host, _port_ar(station_index), timeout=_SERVE_TIMEOUT)
+            rpc_a = _paced_rpc(ar, serving=True)
             rb = Link(auth_key=auth_key)
-            rb.connect(bob_host, port_rb)
+            rb.connect(bob_host, _port_rb(station_index))
+            rpc_b = _paced_rpc(rb, serving=False)
             links = [ar, rb]
-            rpc_a, rpc_b = RpcChannel(ar), RpcChannel(rb)
             ar.start_rx()
             rb.start_rx()
             result = _run_repeater(rpc_a, rpc_b)
         else:                                       # alice — register authority
-            ar = Link(auth_key=auth_key)
-            ar.connect(repeater_host, port_ar)
+            rpc_stations = []
+            for i in range(1, num_stations + 1):
+                ar = Link(auth_key=auth_key)
+                ar.connect(repeater_hosts[i - 1], _port_ar(i))
+                rpc_stations.append(_paced_rpc(ar, serving=False))
+                ar.start_rx()
+                links.append(ar)
             ab = Link(auth_key=auth_key)
             ab.connect(bob_host, port_ab)
-            links = [ar, ab]
-            rpc_r, rpc_b = RpcChannel(ar), RpcChannel(ab)
-            ar.start_rx()
+            rpc_b = _paced_rpc(ab, serving=False)
             ab.start_rx()
-            result = _run_alice(rpc_r, rpc_b, num_pairs, fidelity,
+            links.append(ab)
+            # Start barrier (mirrors the two-node path's _START_BARRIER_PS):
+            # bob accepts + syncs its K station links serially AFTER ab, each
+            # gated by that station's 0.25 s connect-retry loop — so without a
+            # barrier alice's first PLAN frames can be stamped before bob is
+            # able to dequeue them, which reads as a spurious "late" in the
+            # lookahead certificate.
+            sleep(0.5 + 0.25 * num_stations)
+            result = _run_alice(rpc_stations, rpc_b, num_pairs, fidelity,
                                 loss_probability, mode, sample_fraction, seed,
                                 do_reconcile, fk_eps)
     finally:
@@ -116,14 +176,25 @@ def run_repeater_node(role: int, name: str, host: str, *, port_ab: int,
             link.close()
 
     result.update({
-        "role": role, "name": name, "mode": mode, "num_nodes": 3,
-        "num_links": _NUM_LINKS, "corrected": apply_correction,
+        "role": role, "name": name, "mode": mode,
+        "num_nodes": num_stations + 2, "num_links": num_stations + 1,
+        "num_stations": num_stations, "corrected": apply_correction,
         "quantum_transport": "entangled-state-service",
         "tx_frames": sum(lk.tx_count for lk in links),
         "rx_frames": sum(lk.rx_count for lk in links),
         "authenticated": auth_key is not None,
         "auth_failures": sum(lk.auth_failures for lk in links),
+        "channel_delay_ps": channel_delay,
+        "timesync": syncs,
+        "lookahead": {
+            "on_time_events": sum(r.on_time_events for r in rpcs),
+            "late_events": sum(r.late_events for r in rpcs),
+            "max_lateness_ps": max((r.max_lateness_ns for r in rpcs),
+                                   default=0) * 1000,
+        },
     })
+    if role == ROLES["repeater"]:
+        result["station_index"] = station_index
     return result
 
 
@@ -135,28 +206,31 @@ def _herald_hist(heralds) -> dict:
     return hist
 
 
-def _run_alice(rpc_r, rpc_b, num_pairs, fidelity, loss_probability, mode,
+def _run_alice(rpc_stations, rpc_b, num_pairs, fidelity, loss_probability, mode,
                sample_fraction, seed, do_reconcile, fk_eps):
     spec = _MODES[mode]
     key_codes = set(spec["key"])
+    num_stations = len(rpc_stations)
+    num_links = num_stations + 1
     svc = QuantumStateService(seed=seed)
     loss_rng = np.random.default_rng(seed + 77)
     a_rng = np.random.default_rng(seed + 101)
 
-    # Generate both link pairs per surviving attempt (per-LINK loss, as in
+    # Generate all L link pairs per surviving attempt (per-LINK loss, as in
     # repeater.py: a failed link heralds "no pair", the attempt just retries).
-    swap_pairs: list[list[int]] = []       # (b1, a2) — the repeater's halves
-    a_end_ids: list[int] = []              # a1 — Alice's end qubit
-    b_end_ids: list[int] = []              # b2 — Bob's end qubit
+    # Station i swaps (b_i, a_{i+1}); the end-to-end pair is (a_1, b_L).
+    swap_pairs: list[list[list[int]]] = [[] for _ in range(num_stations)]
+    a_end_ids: list[int] = []              # a_1 — Alice's end qubit
+    b_end_ids: list[int] = []              # b_L — Bob's end qubit
     for _ in range(num_pairs):
         if loss_probability > 0.0 and any(
-                loss_rng.random() < loss_probability for _ in range(_NUM_LINKS)):
+                loss_rng.random() < loss_probability for _ in range(num_links)):
             continue
-        a1, b1 = svc.register.create_bell_pair(fidelity)
-        a2, b2 = svc.register.create_bell_pair(fidelity)
-        swap_pairs.append([int(b1), int(a2)])
-        a_end_ids.append(a1)
-        b_end_ids.append(b2)
+        pairs = [svc.register.create_bell_pair(fidelity) for _ in range(num_links)]
+        for i in range(num_stations):
+            swap_pairs[i].append([int(pairs[i][1]), int(pairs[i + 1][0])])
+        a_end_ids.append(pairs[0][0])
+        b_end_ids.append(pairs[-1][1])
     n_del = len(a_end_ids)
 
     # Alice measures her end first (delayed-choice: order doesn't change the
@@ -165,15 +239,20 @@ def _run_alice(rpc_r, rpc_b, num_pairs, fidelity, loss_probability, mode,
     a_bits = [svc.measure(a_end_ids[k], _ANGLE[int(a_codes[k])])
               for k in range(n_del)]
 
-    rpc_r.send("PLAN_R", {"swap_pairs": swap_pairs})
+    for i, rpc in enumerate(rpc_stations):
+        rpc.send("PLAN_R", {"swap_pairs": swap_pairs[i]})
     rpc_b.send("PLAN_B", {"end_ids": [int(x) for x in b_end_ids],
                           "a_codes": [int(c) for c in a_codes],
-                          "attempts": num_pairs, "delivered": n_del})
+                          "attempts": num_pairs, "delivered": n_del,
+                          "num_stations": num_stations})
 
-    # Serve the repeater's batched swap (the BSMs against the shared register).
-    req = rpc_r.recv("BSM_REQ")
-    heralds = [list(svc.bell_measure(int(q1), int(q2))) for q1, q2 in req["pairs"]]
-    rpc_r.send("BSM_RESP", {"heralds": heralds})
+    # Serve each station's batched swap (the BSMs against the shared register).
+    # Station order is arbitrary physics-wise (the BSMs commute); serving in
+    # index order just keeps the run deterministic.
+    for rpc in rpc_stations:
+        req = rpc.recv("BSM_REQ")
+        heralds = [list(svc.bell_measure(int(q1), int(q2))) for q1, q2 in req["pairs"]]
+        rpc.send("BSM_RESP", {"heralds": heralds})
 
     # Serve Bob's heralded corrections + measurements in one batch.
     req = rpc_b.recv("CORR_MEAS_REQ")
@@ -211,10 +290,11 @@ def _run_alice(rpc_r, rpc_b, num_pairs, fidelity, loss_probability, mode,
                "chsh_pairs": chsh_n, "sifted_bits": len(key_pos),
                "key_bits": len(key_only), "secure_fraction": secure_fraction,
                "final_key_bits": int(len(key_only) * secure_fraction),
-               "attempts": num_pairs, "delivered": n_del, "swaps": n_del,
-               "qber_pred": chain_qber(fidelity, _NUM_LINKS),
-               "fidelity_pred": chain_fidelity(fidelity, _NUM_LINKS),
-               "chsh_pred": chain_chsh(fidelity, _NUM_LINKS)}
+               "attempts": num_pairs, "delivered": n_del,
+               "swaps": n_del * num_stations,
+               "qber_pred": chain_qber(fidelity, num_links),
+               "fidelity_pred": chain_fidelity(fidelity, num_links),
+               "chsh_pred": chain_chsh(fidelity, num_links)}
     rpc_b.send("SUMMARY", summary)
 
     reconciled = False
@@ -242,7 +322,7 @@ def _run_alice(rpc_r, rpc_b, num_pairs, fidelity, loss_probability, mode,
             **summary}
 
 
-def _run_bob(rpc_a, rpc_r, num_pairs, mode, sample_fraction, seed,
+def _run_bob(rpc_a, rpc_stations, num_pairs, mode, sample_fraction, seed,
              do_reconcile, cascade_passes, fk_eps, apply_correction):
     spec = _MODES[mode]
     key_codes = set(spec["key"])
@@ -253,17 +333,26 @@ def _run_bob(rpc_a, rpc_r, num_pairs, mode, sample_fraction, seed,
     a_codes = plan["a_codes"]
     n_del = plan["delivered"]
 
-    # The heralds arrive over the REPEATER's link — the multi-hop classical hop.
-    heralds = rpc_r.recv("HERALDS")["heralds"]
-    if len(heralds) != n_del:
-        raise ValueError(f"herald count {len(heralds)} != delivered {n_del}")
+    # One herald stream per station — the multi-hop classical hops. Order of
+    # arrival across stations doesn't matter (each has its own queue).
+    herald_streams = []
+    for rpc in rpc_stations:
+        heralds = rpc.recv("HERALDS")["heralds"]
+        if len(heralds) != n_del:
+            raise ValueError(f"herald count {len(heralds)} != delivered {n_del}")
+        herald_streams.append(heralds)
 
-    # Correct X^m2·Z^m1 (restoring phi+) and measure, batched through the service.
+    # Compose the correction per pair: Paulis compose by XOR of the herald bits.
     b_codes = [int(c) for c in b_rng.choice(np.array(spec["bob"]), size=n_del)]
     reqs = []
     for k in range(n_del):
-        m1, m2 = heralds[k]
-        x, z = (int(m2), int(m1)) if apply_correction else (0, 0)
+        x = z = 0
+        for stream in herald_streams:
+            m1, m2 = stream[k]
+            x ^= int(m2)
+            z ^= int(m1)
+        if not apply_correction:
+            x = z = 0
         reqs.append([int(end_ids[k]), x, z, b_codes[k]])
     b_bits = rpc_a.call("CORR_MEAS_REQ", {"reqs": reqs},
                         expected="CORR_MEAS_RESP")["outcomes"]
@@ -309,15 +398,20 @@ def _run_bob(rpc_a, rpc_r, num_pairs, mode, sample_fraction, seed,
                        "asymptotic_bits": fk.asymptotic_bits,
                        "qber_upper": fk.qber_upper, "mu": fk.mu, **fk_eps}
 
+    all_heralds = [h for stream in herald_streams for h in stream]
     return {"key": bits_to_int(key_arr), "reconciled": reconciled,
             "corrections": corrections, "bits_leaked": bits_leaked,
             "secure_key_bits": secure_len, "finite_key": finite_info,
-            "heralds": _herald_hist(heralds),
+            "heralds": _herald_hist(all_heralds),
+            "heralds_per_station": [_herald_hist(s) for s in herald_streams],
             **summary}
 
 
 def _run_repeater(rpc_a, rpc_b):
-    """Middle node: swap (batched BSM against the register), herald to Bob."""
+    """Middle station: swap (batched BSM against the register), herald to Bob.
+
+    Identical for any chain length — a station only knows its own segment.
+    """
     plan = rpc_a.recv("PLAN_R")
     heralds = rpc_a.call("BSM_REQ", {"pairs": plan["swap_pairs"]},
                          expected="BSM_RESP")["heralds"]

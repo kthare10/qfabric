@@ -95,25 +95,37 @@ class Link:
             buf += chunk
         return buf
 
+    def recv_one(self) -> bytes | None:
+        """Read exactly one frame synchronously (header + payload + auth open).
+
+        Returns None on EOF / closed socket; raises AuthError on a bad tag.
+        Safe only before ``start_rx`` (the timesync handshake) or from within
+        the RX thread itself — two concurrent readers would interleave frames.
+        """
+        header = self._recv_exact(_LEN.size)
+        if header is None:
+            return None
+        (length,) = _LEN.unpack(header)
+        payload = self._recv_exact(length)
+        if payload is None:
+            return None
+        if self._auth is not None:
+            payload = self._auth.open(payload)
+        self.rx_count += 1
+        return payload
+
     def _rx_loop(self) -> None:
         while self._running:
-            header = self._recv_exact(_LEN.size)
-            if header is None:
+            try:
+                payload = self.recv_one()
+            except AuthError as exc:
+                self.auth_failures += 1
+                print(f"Link: authentication failure, closing: {exc}",
+                      flush=True)
+                self.close()
                 break
-            (length,) = _LEN.unpack(header)
-            payload = self._recv_exact(length)
             if payload is None:
                 break
-            if self._auth is not None:
-                try:
-                    payload = self._auth.open(payload)
-                except AuthError as exc:
-                    self.auth_failures += 1
-                    print(f"Link: authentication failure, closing: {exc}",
-                          flush=True)
-                    self.close()
-                    break
-            self.rx_count += 1
             if self.on_frame is not None:
                 self.on_frame(payload)
 
@@ -137,11 +149,25 @@ class Link:
 class Listener:
     """Decodes inbound frames and injects them into the local timeline.
 
+    Delivery time — the emulation-fidelity contract:
+
+    * Frame carries ``t_send`` AND ``delay > 0`` (lookahead mode): deliver at
+      exactly ``t_send + delay`` in shared sim time — the event time a pure
+      simulator would use. The modeled channel delay is the *lookahead* of a
+      conservative distributed DES: as long as the real wire latency stays
+      below ``delay * time_scale``, the frame arrives before its deadline and
+      the emulation executes the simulator's exact event schedule. A frame that
+      arrives past its deadline fires immediately and is counted
+      (``late_events`` / ``max_lateness_ps``) — the per-run fidelity report.
+      Requires the timesync epoch handshake so both clocks share an origin.
+    * Otherwise (no ``t_send``, or ``delay == 0``): legacy behavior — deliver
+      at local arrival time plus ``delay`` (real latency + modeled extra).
+
     Args:
         timeline: the RealTimeTimeline to inject events into (thread-safe).
         node: the local SeQUeNCe node (classical frames -> node.receive_message).
         protocol: the local DistributedBB84 (quantum frames -> protocol.receive_qubits).
-        delay: modeled extra delay (ps) added on top of the real wire latency.
+        delay: modeled one-way channel delay (ps).
     """
 
     def __init__(self, timeline, node, protocol, delay: int = 0):
@@ -150,10 +176,25 @@ class Listener:
         self.protocol = protocol
         self.delay = delay
         self._seq = 0  # monotonic priority -> preserve wire (FIFO) order at equal times
+        self.on_time_events = 0
+        self.late_events = 0
+        self.max_lateness_ps = 0
 
     def on_frame(self, data: bytes) -> None:
         frame = WireCodec.decode(data)
-        fire = self.timeline.now() + self.delay
+        now = self.timeline.now()
+        t_send = frame.get("t_send")
+        if t_send is not None and self.delay > 0:
+            fire = t_send + self.delay
+            lateness = now - fire
+            if lateness > 0:        # missed the sim deadline: fire ASAP, record
+                self.late_events += 1
+                self.max_lateness_ps = max(self.max_lateness_ps, lateness)
+                fire = now
+            else:
+                self.on_time_events += 1
+        else:
+            fire = now + self.delay
         if frame["kind"] == "classical":
             msg = WireCodec.to_message(frame)
             proc = Process(self.node, "receive_message", [frame["src"], msg])

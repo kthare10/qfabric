@@ -41,8 +41,15 @@ def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
                  sample_fraction: float = 0.1, seed: int = 0,
                  do_reconcile: bool = True, cascade_passes: int = 4,
                  finite_key: bool = False, eps_sec: float = 1e-9,
-                 eps_cor: float = 1e-15, auth_key: str | None = None) -> dict:
-    """Run one side of a distributed E91/BBM92 session; return the result dict."""
+                 eps_cor: float = 1e-15, auth_key: str | None = None,
+                 channel_delay: int = 0) -> dict:
+    """Run one side of a distributed E91/BBM92 session; return the result dict.
+
+    ``channel_delay`` (ps) turns on lookahead pacing: every classical message
+    is delivered at exactly t_send + delay in shared clock terms (see
+    RpcChannel), so the run reproduces a simulator's message timing as long
+    as real latency stays under the modeled delay.
+    """
     spec = _MODES[mode]
     key_codes = set(spec["key"])
     fk_eps = {"eps_sec": eps_sec, "eps_cor": eps_cor} if finite_key else None
@@ -51,7 +58,9 @@ def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
         link.serve(host, port)
     else:
         link.connect(host, port)
-    rpc = RpcChannel(link)
+    from .timesync import sync_link
+    peer_offset_ns, rtt_ns = sync_link(link, serving=(role == 1))
+    rpc = RpcChannel(link, delay_ps=channel_delay, peer_offset_ns=peer_offset_ns)
     link.start_rx()
 
     try:
@@ -70,7 +79,12 @@ def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
                    "quantum_transport": "entangled-state-service",
                    "tx_frames": link.tx_count, "rx_frames": link.rx_count,
                    "authenticated": auth_key is not None,
-                   "auth_failures": link.auth_failures})
+                   "auth_failures": link.auth_failures,
+                   "channel_delay_ps": channel_delay,
+                   "timesync": {"offset_ns": peer_offset_ns, "rtt_ns": rtt_ns},
+                   "lookahead": {"on_time_events": rpc.on_time_events,
+                                 "late_events": rpc.late_events,
+                                 "max_lateness_ps": rpc.max_lateness_ns * 1000}})
     return result
 
 
