@@ -560,6 +560,11 @@ def configure_switch(slice_obj, threshold: int):
         f"table_add quantum_channel_params set_channel_params 0 => {threshold} 1 {sw_bob_mac_hex} {bob_mac_hex}",
         f"table_add port_forwarding port_forward 0 => 1 {sw_bob_mac_hex} {bob_mac_hex}",
         f"table_add port_forwarding port_forward 1 => 0 {sw_alice_mac_hex} {alice_mac_hex}",
+        # Emulated classical channel (0x7102): same bidirectional 0<->1 pipe +
+        # MAC rewrite as port_forwarding, but through the dedicated classical
+        # table/counter so classical frames are classified and counted (no loss).
+        f"table_add classical_channel_params classical_forward 0 => 1 {sw_bob_mac_hex} {bob_mac_hex}",
+        f"table_add classical_channel_params classical_forward 1 => 0 {sw_alice_mac_hex} {alice_mac_hex}",
     ):
         switch.execute(f'echo "{cmd}" | {cli} --thrift-port 9090', quiet=True)
 
@@ -794,33 +799,89 @@ def run_bb84(slice_obj, scenario_path: str, alice_mac: str, bob_mac: str,
 _CLASSICAL_PORT = 5100
 
 
-def apply_classical_netem(slice_obj, delay_ms=0, jitter_ms=0, loss_pct=0.0,
-                          alice_delay_ms=None, bob_delay_ms=None):
-    """Impair ONLY the classical BB84 channel (TCP port 5100), leaving the photon
-    data plane (EtherType 0x7101, which is non-IP) untouched.
+def _netem_spec(delay_ms, jitter_ms, loss_pct):
+    netem = "netem"
+    if delay_ms:
+        netem += f" delay {delay_ms}ms" + (f" {jitter_ms}ms" if jitter_ms else "")
+    if loss_pct:
+        netem += f" loss {loss_pct}%"
+    return netem
 
-    On each endpoint's data-plane iface we install a `prio` qdisc and attach a
-    `netem` band, then a u32 filter routes classical TCP:5100 traffic (matched on
-    src or dst port) into the netem band — photon frames fall through unaffected.
-    This is what lets us measure the *classical-network* effect on QKD in isolation,
-    which ideal-channel simulators cannot.
+
+def _install_netem(node, iface, netem, protocols):
+    """prio qdisc + netem band on `iface`, steering the given ethertypes into it.
+
+    `protocols` are tc `protocol` selectors (e.g. "ip", "0x7102"); a match-all u32
+    (mask 0) sends every frame of that ethertype through the netem band. Other
+    traffic falls through the default bands unaffected.
+    """
+    cmd = (f"sudo tc qdisc del dev {iface} root 2>/dev/null; "
+           f"sudo tc qdisc add dev {iface} root handle 1: prio && "
+           f"sudo tc qdisc add dev {iface} parent 1:3 handle 30: {netem}")
+    for proto in protocols:
+        cmd += (f" && sudo tc filter add dev {iface} parent 1:0 protocol {proto} "
+                f"prio 1 u32 match u32 0 0 flowid 1:3")
+    node.execute(cmd, quiet=True)
+
+
+def apply_classical_netem(slice_obj, delay_ms=0, jitter_ms=0, loss_pct=0.0,
+                          alice_delay_ms=None, bob_delay_ms=None,
+                          classical_transport="tcp", impair_quantum=False):
+    """Impair the classical channel as a **stress test** — NOT a realistic operating
+    point. Real QKD's classical channel is engineered ~0 delay/loss; the realistic
+    delay is the model-layer `--channel-delay auto` (4.9 us/km of the same L),
+    delivered at exact sim times by the lookahead scheduler. Use netem only for
+    jitter/congestion/loss sensitivity studies.
+
+    Two mechanisms, selected by `classical_transport`:
+
+    * ``"tcp"`` (legacy): netem on each ENDPOINT data-plane iface, u32-filtered on
+      the classical sifting port (TCP:5100) so photon 0x7101 frames (non-IP) fall
+      through untouched.
+    * ``"l2"``: netem on the SWITCH's two egress ports, matched by **EtherType
+      0x7102** — the L2 classical frame is non-IP, so the old TCP:5100 filter would
+      silently no-op. This is the honest split: the P4 pipeline owns classify /
+      forward / loss, and netem on the switch egress owns propagation delay (BMv2
+      has no primitive to hold a packet). `impair_quantum=True` also delays the
+      0x7101 photons on the Bob-side egress (models photon flight time).
 
     delay_ms/jitter_ms/loss_pct apply symmetrically; pass alice_delay_ms /
-    bob_delay_ms for asymmetric per-direction latency.
+    bob_delay_ms for asymmetric per-direction latency (toward Alice / toward Bob).
+
+    NOTE (slice): libpcap's default PACKET_QDISC_BYPASS can make BMv2's TX skip the
+    egress qdisc on some builds; if switch-egress netem shows no effect, disable the
+    bypass (or prefer the model-layer `--channel-delay` for fidelity). Verify live.
     """
-    pairs = [
-        ("alice", "net_alice_switch", delay_ms if alice_delay_ms is None else alice_delay_ms),
-        ("bob", "net_switch_bob", delay_ms if bob_delay_ms is None else bob_delay_ms),
-    ]
-    print(f"\n=== Applying classical-channel netem (TCP:{_CLASSICAL_PORT}) ===")
-    for name, netname, d in pairs:
+    a_delay = delay_ms if alice_delay_ms is None else alice_delay_ms
+    b_delay = delay_ms if bob_delay_ms is None else bob_delay_ms
+
+    if classical_transport == "l2":
+        # Switch egress: toward Alice (B->A classical) and toward Bob (A->B
+        # classical + photons). Match 0x7102 both ways; add 0x7101 only on the
+        # Bob-side egress (the photon direction) when impair_quantum is set.
+        switch = slice_obj.get_node("switch")
+        print("\n=== Applying classical-channel netem (SWITCH egress, EtherType 0x7102"
+              f"{' + 0x7101' if impair_quantum else ''}) [STRESS] ===")
+        legs = [
+            ("toward-alice", "net_alice_switch", a_delay, ["0x7102"]),
+            ("toward-bob", "net_switch_bob", b_delay,
+             ["0x7102"] + (["0x7101"] if impair_quantum else [])),
+        ]
+        for label, netname, d, protos in legs:
+            iface = switch.get_interface(network_name=netname).get_device_name()
+            netem = _netem_spec(d, jitter_ms, loss_pct)
+            _install_netem(switch, iface, netem, protos)
+            print(f"  switch {label} ({iface}): {netem} [{', '.join(protos)}]")
+        return
+
+    # Legacy TCP path: netem on the endpoints, filtered on the classical port.
+    print(f"\n=== Applying classical-channel netem (endpoints, TCP:{_CLASSICAL_PORT}) "
+          "[STRESS] ===")
+    for name, netname, d in (("alice", "net_alice_switch", a_delay),
+                             ("bob", "net_switch_bob", b_delay)):
         node = slice_obj.get_node(name)
         iface = node.get_interface(network_name=netname).get_device_name()
-        netem = "netem"
-        if d:
-            netem += f" delay {d}ms" + (f" {jitter_ms}ms" if jitter_ms else "")
-        if loss_pct:
-            netem += f" loss {loss_pct}%"
+        netem = _netem_spec(d, jitter_ms, loss_pct)
         node.execute(
             f"sudo tc qdisc del dev {iface} root 2>/dev/null; "
             f"sudo tc qdisc add dev {iface} root handle 1: prio && "
@@ -835,27 +896,41 @@ def apply_classical_netem(slice_obj, delay_ms=0, jitter_ms=0, loss_pct=0.0,
 
 
 def clear_classical_netem(slice_obj):
-    """Remove any netem/tc qdisc from the Alice and Bob data-plane interfaces."""
-    for name, netname in [("alice", "net_alice_switch"), ("bob", "net_switch_bob")]:
-        node = slice_obj.get_node(name)
-        iface = node.get_interface(network_name=netname).get_device_name()
-        node.execute(f"sudo tc qdisc del dev {iface} root 2>/dev/null || true", quiet=True)
-    print("  cleared classical netem on Alice and Bob")
+    """Remove any netem/tc qdisc from BOTH endpoints and the switch egress ports
+    (covers both the legacy TCP and the L2 classical-netem placements)."""
+    targets = [("alice", "net_alice_switch"), ("bob", "net_switch_bob"),
+               ("switch", "net_alice_switch"), ("switch", "net_switch_bob")]
+    for name, netname in targets:
+        try:
+            node = slice_obj.get_node(name)
+            iface = node.get_interface(network_name=netname).get_device_name()
+            node.execute(f"sudo tc qdisc del dev {iface} root 2>/dev/null || true", quiet=True)
+        except Exception:  # noqa: BLE001 — best-effort cleanup across placements
+            pass
+    print("  cleared classical netem on Alice, Bob, and the switch")
 
 
 def run_network_conditions_experiment(
     slice_obj, scenario_path="validation/scenarios/fabric_1km.yml", conditions=None,
 ):
-    """Measure the effect of CLASSICAL-channel conditions on BB84.
+    """Sweep CLASSICAL-channel **stress** conditions and measure their effect on BB84.
 
-    For each condition, impair only the classical channel, run BB84, and record
-    QBER (should be ~flat — TCP is reliable), elapsed time-to-key, and effective
+    These are sensitivity/stress studies, NOT realistic operating points: real QKD's
+    classical channel is engineered ~0 delay/loss. The *realistic* headline number is
+    the `baseline` condition run with the model-layer delay (`channel_delay="auto"` →
+    4.9 us/km of the same L), which the lookahead scheduler delivers at exact sim
+    times; the delay/jitter/loss conditions below are the stress envelope around it.
+
+    For each condition, impair the classical channel, run BB84, and record QBER
+    (should be ~flat — the channel is reliable), elapsed time-to-key, and effective
     key bits/second. This isolates the real-network impact that ideal-channel
     simulators (SeQUeNCe/NetSquid) cannot capture. Results → results/network_effects.json.
 
     Prereqs: configure_switch + setup_dataplane_ips already done (notebook 01).
     `conditions` is a list of dicts: {name, delay_ms, jitter_ms, loss_pct,
-    alice_delay_ms, bob_delay_ms}; defaults to a representative set.
+    alice_delay_ms, bob_delay_ms, classical_transport}; defaults to a representative
+    set. Pass `classical_transport="l2"` in a condition to stress the raw-0x7102
+    path on the switch egress instead of the TCP endpoints.
     """
     import json as _json
 
@@ -1107,7 +1182,8 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
                       auth_key=None, finite_key=False, basis_bias=0.5,
                       dead_time=0.0, timing_jitter=0.0, pulse_period_ns=0.0,
                       decoy=False, mu_signal=0.6, mu_decoy=0.1, mu_vacuum=0.001,
-                      decoy_probs="0.7,0.2,0.1", channel_delay="auto"):
+                      decoy_probs="0.7,0.2,0.1", channel_delay="auto",
+                      classical_transport="tcp", epoch_ns=0):
     """Run distributed-SeQUeNCe BB84 across the slice (raw 0x7101 photons via P4).
 
     Runs real SeQUeNCe QKDNode/BB84 instances (via `qne_sequence.node_runner`) on
@@ -1133,6 +1209,24 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
     #            loss=model needs no switch); set MACs for FABRIC OVS delivery.
     #   tcp   -> photon descriptors over the same TCP link as the classical channel;
     #            NO switch, NO raw socket, NO root, NO photon ifaces/MACs.
+    # The L2 classical channel (raw 0x7102 through the switch) needs (a) raw quantum
+    # mode so --photon-iface is set (both wavelengths share the data-plane iface) and
+    # (b) the BMv2 switch in the path. Alice and Bob sit on SEPARATE L2 segments
+    # (net_alice_switch, net_switch_bob) joined only by the switch, so the
+    # bidirectional 0x7102 channel needs BMv2's classical_channel_params table to
+    # bridge them — a no-switch (loss=model/none) run has no such bridge, and each
+    # node's peer lives on a segment it cannot reach directly.
+    if classical_transport == "l2":
+        if transport != "raw":
+            raise ValueError("classical_transport='l2' requires transport='raw' "
+                             "(the 0x7102 classical channel shares the photon iface)")
+        if loss not in ("switch", "auto"):
+            raise ValueError(
+                "classical_transport='l2' requires the BMv2 switch in the path "
+                "(loss='switch' or 'auto'): Alice and Bob are on separate L2 "
+                "segments the switch must bridge for the bidirectional 0x7102 "
+                f"channel; got loss={loss!r}")
+
     alice_photon_args = bob_photon_args = ""
     if transport == "raw":
         alice_iface = alice.get_interface(network_name="net_alice_switch").get_device_name()
@@ -1150,6 +1244,20 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
         bob_photon_args = f"--photon-iface {bob_iface}"
         print(f"\n=== Running distributed-SeQUeNCe BB84 (raw 0x7101, loss={loss}) ===")
         print(f"  Alice iface {alice_iface} src {alice_mac} -> dst {dst_mac}")
+        # The L2 classical channel is bidirectional, so BOB also transmits raw
+        # frames and needs real MACs (Alice's photon --src/--dst already double as
+        # her classical MACs; in the switch mode l2 requires, her dst is the switch's
+        # Alice-side port MAC). l2 is guarded to switch mode above, so Bob's dst is
+        # his OWN switch-side port MAC — a real MAC on Bob's own segment
+        # (net_switch_bob), never a peer MAC on a segment Bob can't reach. A
+        # placeholder dst would be dropped by FABRIC OVS before reaching BMv2.
+        if classical_transport == "l2":
+            bob_mac = bob.get_interface(network_name="net_switch_bob").get_mac()
+            bob_dst_mac = slice_obj.get_node("switch").get_interface(
+                network_name="net_switch_bob").get_mac()
+            bob_photon_args += f" --src-mac {bob_mac} --dst-mac {bob_dst_mac}"
+            print(f"  Bob   iface {bob_iface} src {bob_mac} -> dst {bob_dst_mac} "
+                  "(L2 classical)")
     else:
         print("\n=== Running distributed-SeQUeNCe BB84 (tcp descriptors, no switch) ===")
     print(f"  Bob classical+photon TCP {bob_data_ip}:{port} | pulses={num_pulses} "
@@ -1164,12 +1272,14 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
               f"--dark-count-rate {dark_count_rate} --distance-km {distance_km} "
               f"--attenuation {attenuation} --sample-fraction {sample_fraction} "
               f"--photon-mode {photon_mode} --quantum-transport {transport} --loss {loss} "
+              f"--classical-transport {classical_transport} "
               f"--photon-drain-ms {photon_drain_ms} --photon-rate-hz {photon_rate_hz} "
               f"--eve-fraction {eve_fraction} --cascade-passes {cascade_passes} "
               f"{'--reconcile' if reconcile else '--no-reconcile'} "
               f"--basis-bias {basis_bias} --dead-time {dead_time} "
               f"--timing-jitter {timing_jitter} --pulse-period-ns {pulse_period_ns} "
               f"--channel-delay {channel_delay} "
+              f"--epoch-ns {epoch_ns} "
               f"--port {port}")
     if auth_key:
         common += f" --auth-key {auth_key}"
@@ -1223,7 +1333,8 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
     print("\n=== Distributed-SeQUeNCe BB84 Results ===")
     for who, r in (("alice", a_res), ("bob", b_res)):
         if r:
-            print(f"  [{who}] transport={r.get('quantum_transport')} "
+            print(f"  [{who}] transport={r.get('quantum_transport')}"
+                  f"/{r.get('classical_transport')} "
                   f"qber={r.get('qber')} sifted={r.get('sifted_bits')} "
                   f"reconciled={r.get('reconciled')} corrections={r.get('corrections')} "
                   f"leaked={r.get('bits_leaked')} secure_key_bits={r.get('secure_key_bits')} "

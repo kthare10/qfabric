@@ -77,7 +77,10 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
              basis_bias: float = 0.5, dead_time: float = 0.0,
              timing_jitter: float = 0.0, pulse_period_ns: float = 0.0,
              decoy: bool = False, mu_signal: float = 0.6, mu_decoy: float = 0.1,
-             mu_vacuum: float = 0.001, decoy_probs: str = "0.7,0.2,0.1") -> dict:
+             mu_vacuum: float = 0.001, decoy_probs: str = "0.7,0.2,0.1",
+             classical_transport: str = "tcp",
+             classical_iface: str | None = None,
+             epoch_seed_ns: int = 0) -> dict:
     role = _ROLES[role_name]
 
     # Photon loss policy (independent of transport):
@@ -145,8 +148,25 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
     node.set_protocol_layer(0, dbb)
     pair_distributed(dbb, role, f"{peer}.BB84", peer)
 
-    # classical control plane: TCP (Bob listens, Alice connects) — real WAN on FABRIC
-    link = Link(auth_key=auth_key)
+    # classical channel: a TCP link (dev / control plane) or a raw-L2 0x7102
+    # reliable-datagram link through the same P4 switch (the emulated classical
+    # channel — pairs with --quantum-transport raw). Bob serves, Alice connects.
+    if classical_transport == "l2":
+        from .l2_link import ReliableLink
+        c_iface = classical_iface or photon_iface or ("veth1" if role == 0 else "veth3")
+        # MACs: src = THIS node's real NIC MAC, dst = THIS node's switch-side port
+        # MAC. dst MUST be a real switch-port MAC (not a placeholder) or the FABRIC
+        # OVS fabric drops the frame instead of delivering it to BMv2's ingress —
+        # exactly as Alice's photon TX addresses the switch. The switch rewrites
+        # BOTH MACs to the peer's real MAC on egress (classical_channel_params), and
+        # the receiver filters on ethertype only, so the peer MAC is never needed
+        # here. deploy_fabric passes the correct per-node --src-mac/--dst-mac (for
+        # Alice these are the same values her photon TX already uses). The
+        # reliable-datagram shim + qne/auth ride on top unchanged.
+        link = ReliableLink(auth_key=auth_key, interface=c_iface,
+                            src_mac=src_mac, dst_mac=dst_mac)
+    else:
+        link = Link(auth_key=auth_key)
     if role == 1:
         link.serve(host, port)
     else:
@@ -156,12 +176,18 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
     # corrected by a Cristian offset estimate (timesync.py). This is what lets
     # the lookahead scheduler deliver frames at exactly t_send + channel_delay —
     # the simulator's event time — with no PTP / synchronized wall clocks.
+    #
+    # Interim central-timeline step (2026-07-15): the epoch may be *seeded by the
+    # orchestrator* (`--epoch-ns`, from the deploy run-plan) instead of picked
+    # locally, so a whole multi-node run stamps against ONE origin the orchestrator
+    # owns — the first move toward hosting the authoritative timeline centrally.
+    # 0 = pick locally (back-compat). The client always adopts the master's value.
     from .timesync import request_epoch, serve_epoch
     if role == 1:
-        epoch_ns = time_ns()
+        epoch_ns = epoch_seed_ns or time_ns()
         peer_offset_ns, rtt_ns = serve_epoch(link, epoch_ns)
         timesync_info = {"role": "master", "offset_ns": peer_offset_ns,
-                         "rtt_ns": rtt_ns}
+                         "rtt_ns": rtt_ns, "epoch_seeded": bool(epoch_seed_ns)}
     else:
         epoch_ns, peer_offset_ns, rtt_ns = request_epoch(link)
         timesync_info = {"role": "client", "offset_ns": peer_offset_ns,
@@ -264,6 +290,7 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         "role": role,
         "name": name,
         "quantum_transport": quantum_transport,
+        "classical_transport": classical_transport,
         "loss_where": loss_where,
         "key": reconciled_key,                       # post-Cascade key (Bob corrected)
         "qber": result.get("qber"),
@@ -402,6 +429,11 @@ def main(argv=None) -> int:
     ap.add_argument("--key-num", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--time-scale", type=float, default=1.0)
+    ap.add_argument("--epoch-ns", type=int, default=0,
+                    help="orchestrator-seeded shared sim-time epoch (wall-clock ns) "
+                         "for the time master; 0 = master picks it locally. The "
+                         "interim central-timeline step: one origin for a whole "
+                         "multi-node run (metric alignment), owned by the run-plan.")
     ap.add_argument("--channel-delay", default="0",
                     help="modeled one-way channel delay in ps, or 'auto' to "
                          "derive it from --distance-km (~4.9e6 ps per km — the "
@@ -428,6 +460,16 @@ def main(argv=None) -> int:
     # quantum transport: tcp descriptor (dev) or raw 0x7101 through P4 (FABRIC)
     ap.add_argument("--quantum-transport", choices=["tcp", "raw"], default="tcp",
                     help="tcp=descriptor-on-wire (no switch); raw=0x7101 L2 frames")
+    # classical transport: tcp (dev / control plane) or raw 0x7102 through P4
+    ap.add_argument("--classical-transport", choices=["tcp", "l2"], default="tcp",
+                    help="classical control channel: tcp=length-prefixed JSON over "
+                         "TCP (dev / control plane); l2=raw 0x7102 Ethernet frames "
+                         "through the same P4 switch with a reliable-datagram shim "
+                         "(seq/ack/resend/dedup + fragmentation). Pairs with "
+                         "--quantum-transport raw. AF_PACKET (Linux/slice) only.")
+    ap.add_argument("--classical-iface", default=None,
+                    help="raw-socket interface for --classical-transport l2 "
+                         "(default: --photon-iface, else veth1/veth3 by role)")
     ap.add_argument("--loss", choices=["auto", "model", "switch", "none"], default="auto",
                     help="photon loss: none=lossless (ignore distance/atten); "
                          "model=software P(dist,atten); switch=external BMv2 P4; "
@@ -508,7 +550,10 @@ def main(argv=None) -> int:
                       args.finite_key, args.eps_sec, args.eps_cor, args.auth_key,
                       args.basis_bias, args.dead_time, args.timing_jitter,
                       args.pulse_period_ns, args.decoy, args.mu_signal,
-                      args.mu_decoy, args.mu_vacuum, args.decoy_probs)
+                      args.mu_decoy, args.mu_vacuum, args.decoy_probs,
+                      classical_transport=args.classical_transport,
+                      classical_iface=args.classical_iface,
+                      epoch_seed_ns=args.epoch_ns)
     print(json.dumps(result))
     return 0
 
