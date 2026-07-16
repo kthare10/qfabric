@@ -103,29 +103,75 @@ control PhotonIngress(
         size = 16;
     }
 
+    /* ---- Emulated classical channel (EtherType 0x7102) ----
+     * The classical control channel rides raw L2 through the same switch as the
+     * photons — "the switch is the fiber, carrying both wavelengths." Loss is NOT
+     * modeled here (the classical channel is engineered lossless); the switch only
+     * classifies, forwards (bidirectional pipe by ingress port), rewrites the MACs
+     * to the egress port's own (FABRIC/OVS MAC-learning workaround, as with the
+     * photon/port_forwarding paths), and counts. Propagation delay is applied by
+     * netem on the switch's egress ports, since BMv2 cannot hold a packet.
+     */
+    counter(256, CounterType.packets) classical_fwd_counter;
+
+    action classical_forward(bit<9> egress_port, bit<48> src_mac, bit<48> dst_mac) {
+        standard_metadata.egress_spec = egress_port;
+        hdr.ethernet.src_addr = src_mac;
+        hdr.ethernet.dst_addr = dst_mac;
+    }
+
+    action classical_drop() {
+        mark_to_drop(standard_metadata);
+    }
+
+    table classical_channel_params {
+        key = {
+            standard_metadata.ingress_port: exact;
+        }
+        actions = {
+            classical_forward;
+            classical_drop;
+        }
+        default_action = classical_drop();
+        size = 16;
+    }
+
     apply {
         if (hdr.photon.isValid()) {
-            /* Photon packet: apply quantum channel loss model */
-            quantum_channel_params.apply();
+            /* Photon packet: apply quantum channel loss model.
+             * Gate the loss/forward logic on a table HIT: on a miss the
+             * default_action drop_photon() has already marked the packet to
+             * drop, and the loss branch below must NOT run — otherwise a
+             * zero-initialized meta.loss_threshold sends the else-branch,
+             * overwriting egress_spec to port 0 and forwarding an
+             * unknown-wavelength photon instead of dropping it. */
+            if (quantum_channel_params.apply().hit) {
+                /* Generate random number for drop decision */
+                random(meta.random_value, (bit<32>)0, (bit<32>)0xFFFFFFFF);
 
-            /* Generate random number for drop decision */
-            random(meta.random_value, (bit<32>)0, (bit<32>)0xFFFFFFFF);
+                /* Count all photon packets */
+                photon_tx_counter.count((bit<32>)hdr.photon.wavelength);
 
-            /* Count all photon packets */
-            photon_tx_counter.count((bit<32>)hdr.photon.wavelength);
-
-            if (meta.random_value < meta.loss_threshold) {
-                /* Photon lost in fiber */
-                photon_drop_counter.count((bit<32>)hdr.photon.wavelength);
-                mark_to_drop(standard_metadata);
-            } else {
-                /* Photon survives — forward to detector (Bob) */
-                standard_metadata.egress_spec = meta.egress_port;
-                hdr.ethernet.src_addr = meta.egress_src_mac;
-                hdr.ethernet.dst_addr = meta.egress_dst_mac;
+                if (meta.random_value < meta.loss_threshold) {
+                    /* Photon lost in fiber */
+                    photon_drop_counter.count((bit<32>)hdr.photon.wavelength);
+                    mark_to_drop(standard_metadata);
+                } else {
+                    /* Photon survives — forward to detector (Bob) */
+                    standard_metadata.egress_spec = meta.egress_port;
+                    hdr.ethernet.src_addr = meta.egress_src_mac;
+                    hdr.ethernet.dst_addr = meta.egress_dst_mac;
+                }
+            }
+            /* else: table miss — default_action drop_photon() already
+             * marked-to-drop; leave the packet dropped. */
+        } else if (meta.is_classical == 1) {
+            /* Emulated classical channel (0x7102): forward + count, no loss */
+            if (classical_channel_params.apply().hit) {
+                classical_fwd_counter.count((bit<32>)standard_metadata.ingress_port);
             }
         } else {
-            /* Non-photon traffic: forward based on ingress port */
+            /* Other non-photon traffic (ARP, control): forward by ingress port */
             port_forwarding.apply();
         }
     }

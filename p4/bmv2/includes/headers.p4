@@ -22,8 +22,9 @@
 #ifndef HEADERS_P4
 #define HEADERS_P4
 
-const bit<16> ETHERTYPE_PHOTON = 0x7101;
-const bit<16> ETHERTYPE_IPV4   = 0x0800;
+const bit<16> ETHERTYPE_PHOTON    = 0x7101;
+const bit<16> ETHERTYPE_CLASSICAL = 0x7102;  /* emulated classical channel (L2) */
+const bit<16> ETHERTYPE_IPV4      = 0x0800;
 
 header ethernet_t {
     bit<48> dst_addr;
@@ -55,6 +56,7 @@ struct metadata_t {
     bit<48> egress_src_mac;  /* Source MAC to rewrite on egress */
     bit<48> egress_dst_mac;  /* Dest MAC to rewrite on egress */
     bit<1>  is_photon;       /* 1 if photon packet */
+    bit<1>  is_classical;    /* 1 if emulated classical (0x7102) frame */
 }
 
 #endif /* HEADERS_P4 */

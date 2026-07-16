@@ -33,7 +33,8 @@ parser PhotonParser(
     state start {
         packet.extract(hdr.ethernet);
         transition select(hdr.ethernet.ether_type) {
-            ETHERTYPE_PHOTON: parse_photon;
+            ETHERTYPE_PHOTON:    parse_photon;
+            ETHERTYPE_CLASSICAL: parse_classical;
             default: accept;
         }
     }
@@ -41,6 +42,16 @@ parser PhotonParser(
     state parse_photon {
         packet.extract(hdr.photon);
         meta.is_photon = 1;
+        transition accept;
+    }
+
+    /* Emulated classical channel (0x7102): mark it, but do NOT extract a header.
+     * The reliable-datagram payload after the Ethernet header is left in the
+     * packet body and re-emitted unchanged by the deparser (which only emits the
+     * ethernet + photon headers). The switch just classifies and forwards it —
+     * "the switch is the fiber, carrying both wavelengths." */
+    state parse_classical {
+        meta.is_classical = 1;
         transition accept;
     }
 }
