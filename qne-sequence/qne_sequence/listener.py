@@ -54,8 +54,21 @@ class Link:
         self.auth_failures = 0
 
     def serve(self, host: str, port: int, timeout: float = 30.0) -> None:
-        ls = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Match ClassicalServer's family detection: an IPv6 literal (or empty
+        # host = bind-all) opens a dual-stack AF_INET6 socket, otherwise IPv4.
+        # On the 10.10.1.x data plane this is IPv4 as before; the change only
+        # makes the management/IPv6 path consistent with ClassicalServer.
+        if ":" in host or host == "":
+            family = socket.AF_INET6
+        else:
+            family = socket.AF_INET
+        ls = socket.socket(family, socket.SOCK_STREAM)
         ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if family == socket.AF_INET6:
+            try:
+                ls.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            except (AttributeError, OSError):
+                pass
         ls.bind((host, port))
         ls.listen(1)
         ls.settimeout(timeout)

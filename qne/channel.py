@@ -160,6 +160,7 @@ class ClassicalClient:
         last_err = None
         for attempt in range(max_retries):
             for family, socktype, proto, canonname, sockaddr in infos:
+                sock = None
                 try:
                     sock = socket.socket(family, socktype, proto)
                     sock.settimeout(timeout)
@@ -168,7 +169,8 @@ class ClassicalClient:
                     return ClassicalChannel(sock, auth_key=auth_key)
                 except OSError as e:
                     last_err = e
-                    sock.close()
+                    if sock is not None:  # socket.socket() itself may have raised
+                        sock.close()
             if attempt < max_retries - 1:
                 print(f"  Retrying connection to {host}:{port} "
                       f"(attempt {attempt + 2}/{max_retries})...")

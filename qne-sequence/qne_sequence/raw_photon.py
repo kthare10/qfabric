@@ -93,7 +93,10 @@ class RawQuantumChannel:
         return self._sock
 
     def _send_photon(self, seq: int, basis: int, bit: int) -> None:
-        ts = time_ns()  # ps fits in 64 bits split hi/lo
+        # Informational timestamp only — Bob's RawPhotonReceiver never reads it
+        # (it extracts [seq, basis, state]). Value is time_ns() in *nanoseconds*
+        # (despite the frame field being named "picoseconds"); split hi/lo.
+        ts = time_ns()
         pkt = PhotonPacket(basis=int(basis), state=int(bit), sequence_num=int(seq),
                            wavelength=self.wavelength,
                            timestamp_hi=(ts >> 32) & 0xFFFFFFFF, timestamp_lo=ts & 0xFFFFFFFF)
