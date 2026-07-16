@@ -261,13 +261,21 @@ class ReliableLink:
         self._server = True
         self._open(host, port)
         deadline = monotonic() + timeout
+        timed_out = False
         with self._handshake_cv:
             while not self._connected and self._running:
                 remaining = deadline - monotonic()
                 if remaining <= 0:
-                    self.close()
-                    raise TimeoutError(f"timed out waiting for peer on {host}:{port}")
+                    timed_out = True
+                    break
                 self._handshake_cv.wait(remaining)
+        # close() re-acquires the shared (non-reentrant) state lock via _handshake_cv,
+        # so it MUST run only after the `with` above has released it — calling it
+        # inside the block deadlocks serve() against itself when the peer never
+        # connects (the timeout path would hang instead of raising).
+        if timed_out:
+            self.close()
+            raise TimeoutError(f"timed out waiting for peer on {host}:{port}")
         if not self._connected:
             raise ConnectionError("link closed before peer established")
 

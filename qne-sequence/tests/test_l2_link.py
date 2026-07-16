@@ -201,3 +201,25 @@ def test_tampered_fragment_raises_auth_error_and_counts_failure():
     assert tampered
     assert server.auth_failures == 1
     close_links(server, client)
+
+
+def test_serve_times_out_without_peer_no_deadlock():
+    # A server whose peer never connects must raise TimeoutError, not hang. serve()
+    # used to call close() while still holding the shared state lock, and close()
+    # re-acquires that same non-reentrant lock on the same thread -> deadlock.
+    server_backend, _client_backend = LoopbackDatagram.pair()
+    server = ReliableLink(backend=server_backend, ack_timeout=0.005)
+    result = []
+
+    def serve():
+        try:
+            server.serve("unused", 0, timeout=0.2)
+        except BaseException as exc:  # noqa: BLE001 — capture whatever it raises
+            result.append(exc)
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    thread.join(timeout=3.0)
+    assert not thread.is_alive(), "serve() deadlocked on timeout with no peer"
+    assert result and isinstance(result[0], TimeoutError)
+    server.close()
