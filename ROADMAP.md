@@ -24,15 +24,25 @@ QFabric runs **BB84 and entanglement-based QKD (E91/BBM92) end-to-end on a real 
 | Notebook workflow 00–13 (slice workflow + local demos) | ✅ |
 | Docs: `PRIMER.md` (concepts from zero) + `CONCEPTS.md` (concept → code map) | ✅ |
 | **Emulation-fidelity program: lookahead delivery + clock sync (no PTP)** — every classical message delivered at exactly `t_send + delay` in shared clock terms (BB84 timeline path, E91, repeater chains, Cascade); per-run certificate (`lookahead.late_events == 0` ⇒ the run executed the simulator's schedule); unified distance knob (`--channel-delay auto` derives delay from the same L as loss); single-site slice default | ✅ 2026-07-15 |
-| Tests: 112 core + 85 distributed, physics-validated; ruff-clean CI | ✅ |
+| **Both channels as raw L2 through the P4 switch** — classical channel off TCP onto raw EtherType `0x7102` (`--classical-transport l2`) with a reliable-datagram shim (`l2_link.ReliableLink`: seq/ack/timeout-resend/dedup + fragmentation, auth unchanged); P4 gains a `classical_channel_params` table + parser branch; P4 table-miss drop bug fixed; netem relocated to switch egress + matched by ethertype (stress only); interim orchestrator-seeded epoch (`--epoch-ns`) | 🟡 code + loopback/unit tests done 2026-07-15; **live-slice validation + P4 recompile pending** |
+| Tests: 112 core + 93 distributed (incl. 8 L2-shim), physics-validated; ruff-clean CI | ✅ |
 
 ---
 
 ## Phase 1 — P4 Quantum Channel Model ✅ (mostly)
 
 - ✅ Fiber loss as probabilistic drop, `P(loss) = 1 − 10^(−α·L/10)`, threshold-based.
-- ✅ Per-wavelength loss table; photon TX/drop counters.
+- ✅ Per-wavelength loss table; photon TX/drop counters. **Table-miss bug fixed
+  (2026-07-15):** the loss branch is now gated on `quantum_channel_params.apply().hit`,
+  so an unknown-wavelength photon is dropped (default action) instead of being forwarded
+  out port 0 by a zero-initialized threshold.
 - ✅ Classical-traffic L2 forwarding (FABRIC OVS MAC workaround).
+- 🟡 **Emulated classical channel in the data plane (2026-07-15):** raw EtherType
+  `0x7102` gets a parser branch + a dedicated `classical_channel_params` table
+  (classify / forward / MAC-rewrite / count, no loss) — "the switch is the fiber,
+  carrying both wavelengths." Code + table-config done; live-slice recompile/validation
+  pending. Propagation delay stays on netem at the switch egress (BMv2 can't hold a
+  packet) or the model-layer timeline.
 - ✅ Sweep figures generated locally via `paper/make_figures.py` (QBER + key rate vs distance/attenuation). `paper/` is git-ignored (drafts + regenerable figures), so re-run the script to produce them. Validate measured drop rate vs analytical once a clean FABRIC sweep dataset is recorded.
 - ⬜ **Timing jitter injection** in the data plane and validation against detector specs.
 - ⬜ **Throughput benchmark**: sustainable photon rate / P4 processing overhead.
@@ -74,7 +84,7 @@ and the netem cost-measurement datasets).
 - ✅ Statistically-correct agreement test (combined-variance, `qber_sample_bits`-aware) + honest SKIPPED/INCONCLUSIVE reporting.
 - ✅ The **live BMv2/socket measurement** is the QFabric data point in the comparison (not just the sim).
 - 🟡 Confirm SeQUeNCe/NetSquid versions on your slice (deadsnakes 3.12 build + netsquid.org creds).
-- 🟡 Quantify where **real classical-network effects** (latency, jitter, congestion) make QFabric diverge from ideal-channel simulators — the core scientific contribution. Scaffolding done: `apply_classical_netem` (impairs only TCP:5100), `run_network_conditions_experiment`, and notebook `06_network_effects` (throughput / time-to-key / QBER vs condition). Needs a recorded FABRIC dataset across conditions/sites.
+- 🟡 Quantify where **real classical-network effects** (latency, jitter, congestion) make QFabric diverge from ideal-channel simulators — the core scientific contribution. Scaffolding done: `apply_classical_netem` (TCP:5100 on the endpoints, or — for the L2 path — the switch egress ports matched by EtherType `0x7102`, relabeled as stress), `run_network_conditions_experiment`, and notebook `06_network_effects` (throughput / time-to-key / QBER vs condition). The realistic headline point is the model-layer delay (`--channel-delay auto`), not netem. Needs a recorded FABRIC dataset across conditions/sites.
 - ⬜ Publish the cross-validation **dataset**.
 
 ## Phase 4 — Scale-Up Experiments 🟡

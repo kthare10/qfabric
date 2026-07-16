@@ -12,12 +12,19 @@ QKD uses two channels, and QFabric treats them very differently:
 | | Quantum channel | Classical channel |
 |---|---|---|
 | Carries | qubits (photons) | control messages (sifting, QBER, heralds, Cascade parities) |
-| In QFabric | **emulated** | **real** (TCP over the FABRIC WAN) |
-| What's modeled | loss + noise (statistical) | latency, jitter, congestion (measured live) |
+| In QFabric | **emulated** — raw `0x7101` L2 through the P4/BMv2 switch | **emulated** — raw `0x7102` L2 through the same switch (TCP available for dev / control plane) |
+| What's modeled | loss + noise (statistical), in the switch | propagation delay (timeline lookahead, or netem on switch egress); ~0 loss |
 
-The design bet is that the quantum channel is a *validated statistical model* while the
-classical channel is a *real network*, so QFabric can measure how real network
-conditions affect QKD performance — the part pure simulators (SeQUeNCe, NetSquid) idealize.
+The design bet: both channels ride the same programmable switch — **the switch *is* the
+fiber**, carrying the quantum wavelength (`0x7101`) and the classical wavelength (`0x7102`).
+The quantum channel is a validated statistical loss+noise model; the classical channel is
+engineered near-lossless with propagation delay only (see below). Running QKD as a *real
+distributed system* over emulated-but-faithful channels is what lets QFabric execute a pure
+simulator's exact event schedule on real hardware — and, as explicit stress runs, measure how
+real network impairments (jitter, congestion) would affect QKD, the part SeQUeNCe/NetSquid
+idealize. The control plane (shared quantum state, timeline RPC) stays TCP: it carries
+emulator bookkeeping, not emulated physics, so dropping a message corrupts state rather than
+modeling a channel.
 
 ## Quantum channel — assumptions
 
@@ -73,6 +80,21 @@ Consequences for QFabric:
   **single-site** (`create_slice`): a photon cannot cross a WAN span, so distance is
   emulated, and the sub-ms site-local network *is* the near-zero classical channel real
   QKD assumes. Cross-site Bob is an explicit stress mode, not the baseline.
+- **Both channels are raw L2 through the switch (2026-07-15).** The classical channel
+  migrates off TCP onto a second EtherType (`0x7102`) carried through the same P4/BMv2
+  switch as the `0x7101` photons — *the switch is the fiber, carrying both wavelengths.*
+  The honest division of labor, since **BMv2 has no primitive to hold a packet** (no
+  propagation-delay model in the data plane): the P4 pipeline owns classification,
+  forwarding, per-wavelength loss (quantum only), and counters; **propagation delay is
+  applied by netem on the switch's egress ports** — per link, per direction, both
+  ethertypes — or, for fidelity runs, modeled in the timeline (lookahead delivery, above).
+  Because a raw-L2 path can drop/reorder/duplicate under burst (socket-buffer overrun,
+  BMv2 backpressure), a thin **reliable-datagram shim** (per-message seq + per-fragment
+  ack + timeout-resend + dedup, plus fragmentation for basis lists that exceed the MTU)
+  sits under the classical channel; the physics is engineered-lossless, so a lossless
+  emulated path is *faithful*, and `qne/auth.py` seals the payload bytes unchanged on top.
+  TCP remains available (`--classical-transport tcp`) for local/dev and is the transport of
+  the control plane. `AF_PACKET` (raw L2) is Linux/slice-only.
 
 ## Timing (revised 2026-07-15 — lookahead delivery, no PTP)
 
@@ -84,6 +106,16 @@ Consequences for QFabric:
   residual error ~RTT/2). **PTP was considered and rejected** — nothing in the protocol
   compares wall clocks across nodes, so full clock synchronization solves a problem the
   design does not have.
+- **Toward a central timeline (interim, 2026-07-15):** rather than PTP, the design goal
+  is one *authoritative* timeline the orchestrator/switch owns (the natural completion of
+  the centralized `QuantumStateService` — centralize time the way state is already
+  centralized). The interim step is in place: the shared epoch can be **seeded by the
+  run-plan** (`--epoch-ns`) instead of picked by the master, so a whole multi-node run
+  stamps against one orchestrator-owned origin (metric alignment). Default `0` keeps the
+  master picking it locally. Hosting the full timeline centrally (remote nodes as thin I/O
+  adapters) is deferred — it is only feasible once nodes are co-located (single-site
+  slice, above), since otherwise every event would pay a cross-site RTT to the timeline;
+  high-rate photon traffic stays in the P4 data plane and never touches it regardless.
 - **Lookahead delivery** (`listener.Listener`): with `channel_delay > 0`, a frame is
   delivered at exactly `t_send + delay` in shared sim time — the event time a pure
   simulator would use — rather than at real-arrival + delay. The modeled channel delay
