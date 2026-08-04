@@ -37,7 +37,7 @@ Alice (Python)  →  BMv2 P4 Switch  →  Bob (Python)
 | `p4/bmv2/` | BMv2 V1Model P4 quantum-channel program (loss model + L2 forwarding) |
 | `validation/` | Cross-validation framework — runs the same scenario on QFabric, SeQUeNCe, and NetSquid and checks statistical agreement |
 | `scripts/` | `deploy_fabric.py` (full FABRIC slice provisioning + run), `install_bmv2.sh`, `package_artifact.sh`, and the cross-validation env setup scripts |
-| `notebooks/` | FABRIC workflow `00_overview` → … → `06_network_effects`, plus `07/08` (SeQUeNCe emulator), `09` (E91 entanglement), `10` (eavesdropper demo). See the reading-order tracks under Quick Start. |
+| `notebooks/` | Grouped by workflow: `00_overview` (start here), `fabric/` (slice deploy + run, 01–06), `sequence/` (distributed SeQUeNCe, 07–09), `concepts/` (QKD teaching demos, 10–13). See the reading-order tracks under Quick Start. |
 | `kiso/` | Kiso experiment config for FABRIC runs |
 | `docker/` | `Dockerfile.bmv2` (thin layer on `p4lang/p4c`); prebuilt image published to GHCR |
 | `paper/` | `make_figures.py` + `figures/` (QBER/key-rate sweep plots) |
@@ -48,24 +48,26 @@ Alice (Python)  →  BMv2 P4 Switch  →  Bob (Python)
 
 ### Notebook workflow — run in order
 
-The notebooks form a single linear workflow. Start at `00_overview`:
+The notebooks are grouped into folders **by workflow** (`fabric/`, `sequence/`, `concepts/`); the numbers still give the global order. Start at `00_overview`:
 
 | # | Notebook | What it does | Where it runs |
 |---|----------|--------------|---------------|
 | 0 | `00_overview` | Orientation + environment check | Anywhere |
-| 1 | `01_setup_slice` | Provision the FABRIC slice, install BMv2, compile P4, start the switch | FABRIC JupyterHub |
-| 2 | `02_run_experiment` | Run BB84 across the slice, collect results, verify | FABRIC JupyterHub |
-| 3 | `03_cross_validation` | Compare QFabric vs SeQUeNCe & NetSquid (one scenario, on the slice) | FABRIC JupyterHub |
-| 4 | `04_analysis` | Load results and generate all plots & tables | Anywhere (ships sample results) |
-| 5 | `05_run_all_scenarios` | Run **every** scenario (singles + sweeps) on the slice + QBER/key-rate sweep figures | FABRIC JupyterHub |
-| 6 | `06_network_effects` | Quantify classical-network (latency/jitter/loss) impact on QKD throughput — the core contribution | FABRIC JupyterHub |
-| 7 | `07_sequence_emulator` | Distributed **SeQUeNCe** BB84 over the real P4 path (`0x7101` frames + TCP) | FABRIC JupyterHub |
-| 8 | `08_sequence_scenarios` | SeQUeNCe-emulator scenario sweeps | Anywhere (loopback) / FABRIC |
-| 9 | `09_entanglement_e91` | Entanglement-based QKD (**E91 / BBM92**) distributed over 2 nodes; CHSH Bell test | Anywhere (loopback) / FABRIC |
-| 10 | `10_eavesdropper` | Intercept-resend attack: QBER & secure-key-rate vs Eve's tap fraction, the ~11% threshold | Anywhere (local) |
-| 11 | `11_reconciliation` | Cascade reconciliation: raw keys → identical secret key; leakage & the abort-above-threshold behavior | Anywhere (loopback) |
-| 12 | `12_repeater` | **Entanglement swapping / repeater chains**: Werner-chain law, CHSH vs hops, heralded-correction control, then the chain across 3 processes | Anywhere (loopback) |
-| 13 | `13_qkd_security` | Security depth: **finite-key** bounds, **authenticated** classical channel, **biased-basis** BB84, **live decoy-state** analysis | Anywhere (loopback) |
+| 1 | `fabric/01_setup_slice` | Provision the FABRIC slice, install BMv2, compile P4, start the switch | FABRIC JupyterHub |
+| 2 | `fabric/02_run_experiment` | Run BB84 across the slice, collect results, verify | FABRIC JupyterHub |
+| 3 | `fabric/03_cross_validation` | Compare QFabric vs SeQUeNCe & NetSquid (one scenario, on the slice) | FABRIC JupyterHub |
+| 4 | `fabric/04_analysis` | Load results and generate all plots & tables | Anywhere (ships sample results) |
+| 5 | `fabric/05_run_all_scenarios` | Run **every** scenario (singles + sweeps) on the slice + QBER/key-rate sweep figures | FABRIC JupyterHub |
+| 6 | `fabric/06_network_effects` | Quantify classical-network (latency/jitter/loss) impact on QKD throughput — the core contribution | FABRIC JupyterHub |
+| 7 | `sequence/07_sequence_emulator` | Distributed **SeQUeNCe** BB84 over the real P4 path (`0x7101` frames + TCP) | FABRIC JupyterHub |
+| 8 | `sequence/08_sequence_scenarios` | SeQUeNCe-emulator scenario sweeps | Anywhere (loopback) / FABRIC |
+| 9 | `sequence/09_entanglement_e91` | Entanglement-based QKD (**E91 / BBM92**) distributed over 2 nodes; CHSH Bell test | Anywhere (loopback) / FABRIC |
+| 10 | `concepts/10_eavesdropper` | Intercept-resend attack: QBER & secure-key-rate vs Eve's tap fraction, the ~11% threshold | Anywhere (local) |
+| 11 | `concepts/11_reconciliation` | Cascade reconciliation: raw keys → identical secret key; leakage & the abort-above-threshold behavior | Anywhere (loopback) |
+| 12 | `concepts/12_repeater` | **Entanglement swapping / repeater chains**: Werner-chain law, CHSH vs hops, heralded-correction control, then the chain across 3 processes | Anywhere (loopback) |
+| 13 | `concepts/13_qkd_security` | Security depth: **finite-key** bounds, **authenticated** classical channel, **biased-basis** BB84, **live decoy-state** analysis | Anywhere (loopback) |
+
+> On-slice variants of the concept demos live in `concepts/fabric/` (`*_fabric`, run locally / gitignored).
 
 The numbers are the **FABRIC deployment order** (0→6 is the linear slice workflow). For
 learning or for slice-free work, read by track instead:
@@ -111,7 +113,7 @@ The cross-validation compares four BB84 results for the same scenario, **all exe
 | SeQUeNCe | alice node (`.venv-seq`, Python 3.12) | SeQUeNCe 1.0 native engine |
 | NetSquid | bob node (`.venv-nsq`) | NetSquid native engine |
 
-SeQUeNCe and NetSquid each drive their **own** engine, so the comparison is genuine independent physics — not a re-run of QFabric's code. Because SeQUeNCe 1.0 needs Python ≥3.12 and NetSquid needs 3.10/3.11 (they can't share an interpreter), they live on different nodes in their own venvs. `deploy_fabric.setup_sim_envs()` builds them (SeQUeNCe via the deadsnakes Python 3.12; NetSquid needs your netsquid.org credentials in `NETSQUID_USER`/`NETSQUID_PASS`), and `run_cross_validation_on_fabric()` runs each adapter on its node and collects the results. Notebook `03_cross_validation` drives both. Unavailable/failed backends are reported **SKIPPED** (never a false pass).
+SeQUeNCe and NetSquid each drive their **own** engine, so the comparison is genuine independent physics — not a re-run of QFabric's code. Because SeQUeNCe 1.0 needs Python ≥3.12 and NetSquid needs 3.10/3.11 (they can't share an interpreter), they live on different nodes in their own venvs. `deploy_fabric.setup_sim_envs()` builds them (SeQUeNCe via the deadsnakes Python 3.12; NetSquid needs your netsquid.org credentials in `NETSQUID_USER`/`NETSQUID_PASS`), and `run_cross_validation_on_fabric()` runs each adapter on its node and collects the results. Notebook `fabric/03_cross_validation` drives both. Unavailable/failed backends are reported **SKIPPED** (never a false pass).
 
 > Each on-node adapter is just `python -m validation.run_<backend> scenario.yml --json -`. The same adapters can also run locally (in JupyterHub or a laptop) — `validation.compare` runs a backend in-process if importable, or in a separate interpreter set via `QFABRIC_SEQUENCE_PYTHON` / `QFABRIC_NETSQUID_PYTHON`. The `scripts/setup_sequence_env.sh` / `setup_netsquid_env.sh` helpers build those local venvs.
 

@@ -127,7 +127,7 @@ $PY sweep.py --reps 10       # more repetitions -> tighter error bars
   `fig_secure_fraction` (Shor-Preskill cutoff), `fig_distance`, `fig_attenuation`,
   `fig_efficiency`, `fig_dark_count`, `fig_sample_fraction`, `fig_key_length`,
   `fig_throughput`, and `fig_network_effects` (FABRIC).
-- **Notebook `../notebooks/08_sequence_scenarios.ipynb`** — local sweep + all figures
+- **Notebook `../notebooks/sequence/08_sequence_scenarios.ipynb`** — local sweep + all figures
   inline (Section A), then on-testbed distance + classical-network-effects sweeps (Section B).
 
 **Coverage / limits:** not swept here — `quantum_transport=raw` (real P4 photons; see
@@ -175,7 +175,7 @@ On FABRIC, `deploy_fabric.run_sequence_bb84(slice_obj, transport='tcp')` runs sw
 
 ## Running on FABRIC
 
-**Recommended:** use the notebook **`../notebooks/07_sequence_emulator.ipynb`** on FABRIC
+**Recommended:** use the notebook **`../notebooks/sequence/07_sequence_emulator.ipynb`** on FABRIC
 JupyterHub. It reuses the slice/switch/data-plane from notebook 1, builds a `.venv-qne`
 (sequence 1.0.0) on both nodes via `deploy_fabric.setup_sequence_runtime`, arms the P4
 loss model, and runs `deploy_fabric.run_sequence_bb84` (raw 0x7101 photons + TCP
