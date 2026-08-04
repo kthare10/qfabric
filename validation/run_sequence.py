@@ -91,7 +91,8 @@ def run_sequence_bb84(scenario: ValidationScenario) -> ValidationResult:
         distance_m = scenario.distance_km * 1000.0
         attenuation_db_m = scenario.attenuation_db_per_km / 1000.0  # SeQUeNCe uses dB/m
         keysize = 256
-        num_keys = 20  # ~5120 sifted bits — enough for a stable QBER comparison
+        num_keys = 50  # ~12800 sifted bits -> QBER 1sigma ~ 0.0009 (tighter estimate,
+                       # so the distance-to-distance QBER wiggle is clearly within noise)
 
         tl = Timeline(1e13)  # ps; finite num_keys stops the run early
         tl.show_progress = False
@@ -130,6 +131,11 @@ def run_sequence_bb84(scenario: ValidationScenario) -> ValidationResult:
 
         # Alice's light source (without this, no photons are emitted!).
         alice.update_lightsource_params("frequency", 80e6)
+        # Weak-coherent source at SeQUeNCe's default mean_photon_num=0.1 (matches the
+        # canonical example/qkd/qkd.ipynb; more single-photon-like than a mean of 1, and
+        # avoids wasting photons on multi-photon pulses). photons_sent is the ACTUAL
+        # emitted-photon count (LightSource.photon_counter — a Poisson draw per pulse), so
+        # sift-yield = sifted / photons_sent is per-emitted-photon, comparable to the emulation.
         alice.update_lightsource_params("mean_photon_num", 0.1)
         # Bob's two detectors.
         det = {"efficiency": scenario.detector_efficiency,
@@ -160,17 +166,25 @@ def run_sequence_bb84(scenario: ValidationScenario) -> ValidationResult:
         from qne.bb84 import BB84Protocol
         secure_fraction = BB84Protocol.secure_key_fraction(qber)
 
-        n = scenario.num_photons
+        # MEASURED emitted-photon count from the light source's own Poisson counter —
+        # NOT a nominal echo and NOT the raw pulse-slot count. SeQUeNCe BB84 is a
+        # target-sifted-length model (it sends as many pulses as the loss demands to
+        # reach num_keys keys), so this rises with distance. sift-yield = sifted /
+        # photons_sent overlays with the emulation's sifted / photon-budget (~e^{-atten*L}).
+        light_source = alice.components[alice.protocol_stack[0].ls_name]
+        photons_sent = int(light_source.photon_counter)
+        sift_yield = sifted_bits / photons_sent if photons_sent > 0 else 0.0
         return ValidationResult(
             platform="sequence",
             scenario_name=scenario.name,
-            photons_sent=n,
+            photons_sent=photons_sent,
             sifted_bits=sifted_bits,
             qber=qber,
-            raw_key_rate=sifted_bits / n if n > 0 else 0.0,
-            secure_key_rate=(sifted_bits * secure_fraction) / n if n > 0 else 0.0,
+            raw_key_rate=sift_yield,                    # sifted bits per photon sent (yield)
+            secure_key_rate=sift_yield * secure_fraction,
             extra={"sequence_version": getattr(sequence, "__version__", "unknown"),
                    "num_keys": num_generated,
+                   "sift_yield": sift_yield,
                    "qber_sample_bits": sifted_bits},  # QBER over the full key
         )
     except Exception as e:  # API drift / runtime issue → honest SKIP, never fake pass

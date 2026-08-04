@@ -555,6 +555,11 @@ def configure_switch(slice_obj, threshold: int):
         cli = "/usr/local/bin/simple_switch_CLI"
 
     # ---- Configure tables (shared by both paths) ----
+    # Both start paths above restart BMv2 fresh (docker `rm -f`+`run`, or stop+systemd-run),
+    # so these table_adds run on an empty table. To CHANGE the loss on an already-running
+    # switch (e.g. a distance sweep) use set_channel_loss (in-place table_modify) — do NOT
+    # re-run configure_switch per point: table_add rejects the duplicate match key, and its
+    # systemd/pkill stop can't restart a Docker-run BMv2, so the loss would freeze.
     print("  Configuring tables...")
     for cmd in (
         f"table_add quantum_channel_params set_channel_params 0 => {threshold} 1 {sw_bob_mac_hex} {bob_mac_hex}",
@@ -570,6 +575,44 @@ def configure_switch(slice_obj, threshold: int):
 
     print("  Switch configured and running")
     return alice_mac, bob_mac, sw_alice_mac, sw_bob_mac, iface_alice, iface_bob
+
+
+def set_channel_loss(slice_obj, threshold: int):
+    """Update the P4 photon-loss threshold IN PLACE on the running BMv2 (no restart).
+
+    A distance sweep must change the loss per point. Calling configure_switch each time
+    is heavy AND unreliable: its systemd/pkill stop can't touch a Docker-run BMv2, and
+    the re-`table_add` is rejected on the duplicate match key — so the threshold stays
+    frozen at the FIRST distance and every point runs at that loss (flat sift-yield vs
+    distance). This clears + re-adds ONLY the loss entry through the running switch's
+    CLI, so loss actually tracks distance. Run configure_switch once first (notebook 1)
+    to compile + start BMv2. `threshold` is int(P_loss * 2**32); see loss_probability().
+    """
+    switch = slice_obj.get_node("switch")
+    bob = slice_obj.get_node("bob")
+    bob_mac_hex = "0x" + bob.get_interface(network_name="net_switch_bob").get_mac().replace(":", "")
+    sw_bob_mac_hex = "0x" + switch.get_interface(network_name="net_switch_bob").get_mac().replace(":", "")
+    # Reach whichever switch is running: the Docker container or a host-built binary.
+    running, _ = switch.execute(
+        "sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -x bmv2 || true", quiet=True)
+    cli = ("sudo docker exec -i bmv2 simple_switch_CLI" if running.strip() == "bmv2"
+           else "/usr/local/bin/simple_switch_CLI")
+    # table_MODIFY updates the existing entry (handle 0) IN PLACE — NOT table_clear +
+    # table_add: a clear leaves the table momentarily empty, and an empty
+    # quantum_channel_params defaults to drop_photon, so any failure between the two
+    # would silently make the switch drop EVERY photon. Modify never empties the table.
+    cmd = (f"table_modify quantum_channel_params set_channel_params 0 "
+           f"{threshold} 1 {sw_bob_mac_hex} {bob_mac_hex}")
+    switch.execute(f'echo "{cmd}" | {cli} --thrift-port 9090', quiet=True)
+    # execute() swallows CLI errors, so VERIFY the new threshold actually landed (else the
+    # entry is stale/missing and the run would be silently wrong). Fail loudly instead.
+    dump, _ = switch.execute(
+        f'echo "table_dump quantum_channel_params" | {cli} --thrift-port 9090', quiet=True)
+    if f"{threshold:08x}" not in dump.lower().replace(" ", ""):
+        raise RuntimeError(
+            f"set_channel_loss: threshold {threshold} (0x{threshold:08x}) did not take — "
+            f"is the entry present? Run configure_switch first (notebook 1). Dump:\n{dump}")
+    print(f"  loss threshold set to {threshold} (P_loss={threshold / 2**32:.4f})")
 
 
 def setup_dataplane_ips(slice_obj, alice_mac: str, bob_mac: str):
@@ -1349,22 +1392,100 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
     return a_res, b_res
 
 
+def run_sequence_sim(slice_obj, *, distance_km, fidelity=0.98, attenuation=0.2,
+                     num_photons=10000, sample_fraction=0.2, seed=42,
+                     node="alice", venv=".venv-qne"):
+    """Run the pure **SeQUeNCe simulator** (validation.run_sequence) for one scenario
+    on a slice node; return the adapter's metrics dict.
+
+    This is the discrete-event SIMULATION baseline the distributed FABRIC emulation
+    (``run_sequence_bb84``) is validated against — the *same* SeQUeNCe BB84 stack,
+    but in-process with no wire. It reuses the ``.venv-qne`` (sequence 1.0.0) that
+    ``setup_sequence_runtime`` already built, so no NetSquid / ``setup_sim_envs`` is
+    needed. Since the classical channel is lossless (ANL SeQUeNCe-team guidance),
+    the meaningful cross-check is QBER-vs-distance fidelity to this simulator, not a
+    latency stress sweep. Returns the payload dict (``qber``, ``sifted_bits``,
+    ``raw_key_rate``, ``secure_key_rate``, ...), or ``{"error": ...}`` on failure.
+    """
+    from validation.compare import run_backend_on_node
+    n = slice_obj.get_node(node)
+    yaml_text = (
+        f"name: sim_{distance_km}km\n"
+        f"channel:\n"
+        f"  distance_km: {distance_km}\n"
+        f"  attenuation_db_per_km: {attenuation}\n"
+        f"  polarization_fidelity: {fidelity}\n"
+        f"detector:\n  efficiency: 0.8\n  dark_count_rate: 10.0\n"
+        f"protocol:\n  num_photons: {num_photons}\n  sample_fraction: {sample_fraction}\n"
+        f"seed: {seed}\n"
+    )
+    # heredoc-write the scenario on the node (avoids a local temp + upload round trip)
+    n.execute(f"cat > ~/qfabric/scenario_sim.yml <<'YAML'\n{yaml_text}YAML", quiet=True)
+    res = run_backend_on_node(n, f"{venv}/bin/python", "validation.run_sequence",
+                              "sequence", scenario_name=f"sim_{distance_km}km",
+                              scenario_file="scenario_sim.yml")
+    return res.to_payload()
+
+
+def run_netsquid_sim(slice_obj, *, distance_km, fidelity=0.98, attenuation=0.2,
+                     num_photons=50000, sample_fraction=0.2, efficiency=0.8,
+                     dark_count=10.0, seed=42, node="bob", venv=".venv-nsq"):
+    """Run the **NetSquid simulator** (validation.run_netsquid) for one scenario on a
+    slice node; return the metrics dict. This is the TRUSTED reference the FABRIC
+    emulation is validated against (cf. Chan et al. 2026, the NetSquid QR paper).
+
+    NetSquid's BB84 adapter is a FIXED-photon-budget model with per-photon
+    Beer-Lambert loss + a DepolarNoiseModel, so it reports photons_received,
+    sifted_bits, QBER, and yield = sifted/photons_sent on the SAME basis as the
+    emulation (run_sequence_bb84) — unlike SeQUeNCe's target-key-length model, which
+    fixes sifted and varies photons sent. That makes it the apples-to-apples baseline.
+
+    PREREQ: NetSquid installed on `node` in `venv` (setup_sim_envs — needs
+    NETSQUID_USER / NETSQUID_PASS from netsquid.org). If NetSquid is absent the adapter
+    returns {"error": ...} and the point is reported SKIPPED (never a fake pass).
+    """
+    from validation.compare import run_backend_on_node
+    n = slice_obj.get_node(node)
+    yaml_text = (
+        f"name: nsq_{distance_km}km\n"
+        f"channel:\n"
+        f"  distance_km: {distance_km}\n"
+        f"  attenuation_db_per_km: {attenuation}\n"
+        f"  polarization_fidelity: {fidelity}\n"
+        f"detector:\n  efficiency: {efficiency}\n  dark_count_rate: {dark_count}\n"
+        f"protocol:\n  num_photons: {num_photons}\n  sample_fraction: {sample_fraction}\n"
+        f"seed: {seed}\n"
+    )
+    n.execute(f"cat > ~/qfabric/scenario_nsq.yml <<'YAML'\n{yaml_text}YAML", quiet=True)
+    res = run_backend_on_node(n, f"{venv}/bin/python", "validation.run_netsquid",
+                              "netsquid", scenario_name=f"nsq_{distance_km}km",
+                              scenario_file="scenario_nsq.yml")
+    return res.to_payload()
+
+
 def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
                      distance_km=1.0, attenuation=0.2, mode="e91",
                      sample_fraction=0.2, reconcile=True, port=5100,
                      bob_data_ip="10.10.1.2", venv=".venv-qne",
-                     auth_key=None, finite_key=False):
+                     auth_key=None, finite_key=False,
+                     classical_transport="tcp"):
     """Run distributed E91/BBM92 entanglement-based QKD across the slice.
 
-    Unlike BB84, entanglement has **no photon plane / no P4 switch**: Alice hosts
-    the shared quantum-state service (the entangled register), Bob measures his
-    halves via RPC, and only the classical coordination (basis announcement, QBER
-    sample + CHSH bits) rides the real data-plane link — that WAN path is the
-    research lever. Fiber loss (distance/attenuation) is applied as pair loss in
-    the service, so ``distance_km``/``attenuation`` still shape the detected count.
+    Unlike BB84, entanglement has **no photon plane**: Alice hosts the shared
+    quantum-state service (the entangled register), Bob measures his halves via
+    RPC, and only the classical coordination (basis announcement, QBER sample +
+    CHSH bits) rides the real data-plane link — that WAN path is the research
+    lever. Fiber loss (distance/attenuation) is applied as pair loss in the
+    service, so ``distance_km``/``attenuation`` still shape the detected count.
+
+    ``classical_transport`` selects that classical link: 'tcp' (default; no switch,
+    direct data-plane TCP) or 'l2' (raw 0x7102 Ethernet frames bridged by the BMv2
+    **P4 switch**, which joins Alice's and Bob's separate L2 segments — the switch
+    applies no photon loss here since E91 sends no 0x7101 photons).
 
     ``mode`` is 'e91' (adds the CHSH Bell test) or 'bbm92' (Z/X, key-efficient).
-    Prereqs: slice up with data-plane IPs (notebook 01) and setup_sequence_runtime().
+    Prereqs: slice up with data-plane IPs (notebook 01) and setup_sequence_runtime()
+    (plus the BMv2 switch from notebook 01 when ``classical_transport='l2'``).
     Returns (alice_result, bob_result) dicts.
     """
     import json as _json
@@ -1372,10 +1493,33 @@ def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
     alice = slice_obj.get_node("alice")
     bob = slice_obj.get_node("bob")
 
-    print(f"\n=== Running distributed E91/BBM92 ({mode}, no switch) ===")
-    print(f"  Bob classical TCP {bob_data_ip}:{port} | pairs={num_pairs} "
-          f"F={fidelity} dist={distance_km}km atten={attenuation}dB/km "
-          f"sample_frac={sample_fraction}")
+    alice_classical_args = bob_classical_args = ""
+    if classical_transport == "l2":
+        configure_switch(slice_obj, 0)
+        alice_iface = alice.get_interface(
+            network_name="net_alice_switch").get_device_name()
+        bob_iface = bob.get_interface(
+            network_name="net_switch_bob").get_device_name()
+        alice_mac = alice.get_interface(network_name="net_alice_switch").get_mac()
+        bob_mac = bob.get_interface(network_name="net_switch_bob").get_mac()
+        alice_dst_mac = slice_obj.get_node("switch").get_interface(
+            network_name="net_alice_switch").get_mac()
+        bob_dst_mac = slice_obj.get_node("switch").get_interface(
+            network_name="net_switch_bob").get_mac()
+        alice_classical_args = (f"--classical-transport l2 "
+                                f"--classical-iface {alice_iface} "
+                                f"--src-mac {alice_mac} --dst-mac {alice_dst_mac}")
+        bob_classical_args = (f"--classical-transport l2 "
+                              f"--classical-iface {bob_iface} "
+                              f"--src-mac {bob_mac} --dst-mac {bob_dst_mac}")
+        print(f"\n=== Running distributed E91/BBM92 ({mode}, L2 classical) ===")
+        print(f"  Alice iface {alice_iface} src {alice_mac} -> dst {alice_dst_mac}")
+        print(f"  Bob   iface {bob_iface} src {bob_mac} -> dst {bob_dst_mac}")
+    else:
+        print(f"\n=== Running distributed E91/BBM92 ({mode}, no switch) ===")
+        print(f"  Bob classical TCP {bob_data_ip}:{port} | pairs={num_pairs} "
+              f"F={fidelity} dist={distance_km}km atten={attenuation}dB/km "
+              f"sample_frac={sample_fraction}")
 
     for node in (alice, bob):
         node.execute("sudo pkill -f qne_sequence.node_runner 2>/dev/null; "
@@ -1389,20 +1533,25 @@ def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
         common += f" --auth-key {auth_key}"
     if finite_key:
         common += " --finite-key"
-    # no raw sockets / no root needed — entanglement uses only the TCP link
-    runner = (f"cd ~/qfabric/qne-sequence && env PYTHONPATH=$HOME/qfabric "
-              f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner")
+    if classical_transport == "l2":
+        runner = (f"cd ~/qfabric/qne-sequence && sudo env PYTHONPATH=$HOME/qfabric "
+                  f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner")
+    else:
+        # no raw sockets / no root needed — entanglement uses only the TCP link
+        runner = (f"cd ~/qfabric/qne-sequence && env PYTHONPATH=$HOME/qfabric "
+                  f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner")
 
+    # *_classical_args are "" for tcp, so the same call covers both transports.
     print("  Starting Bob (listener)...")
     bob_thread = bob.execute_thread(
         f"{runner} --role bob --name bob --peer alice --host 0.0.0.0 "
-        f"{common} 2>&1 | tee /tmp/e91_bob.log")
-    time.sleep(8)  # let Bob open the TCP listener
+        f"{bob_classical_args} {common} 2>&1 | tee /tmp/e91_bob.log")
+    time.sleep(8)  # let Bob open the listener
 
     print("  Starting Alice (state-service host)...")
     alice_thread = alice.execute_thread(
         f"{runner} --role alice --name alice --peer bob --host {bob_data_ip} "
-        f"{common} 2>&1 | tee /tmp/e91_alice.log")
+        f"{alice_classical_args} {common} 2>&1 | tee /tmp/e91_alice.log")
 
     print("  Waiting for Alice...")
     a_out = alice_thread.result()
