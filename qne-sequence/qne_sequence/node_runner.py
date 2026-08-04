@@ -534,7 +534,10 @@ def main(argv=None) -> int:
             sample_fraction=args.sample_fraction, seed=args.seed,
             do_reconcile=args.reconcile, cascade_passes=args.cascade_passes,
             finite_key=args.finite_key, eps_sec=args.eps_sec, eps_cor=args.eps_cor,
-            auth_key=args.auth_key, channel_delay=channel_delay)
+            auth_key=args.auth_key, channel_delay=channel_delay,
+            classical_transport=args.classical_transport,
+            classical_iface=args.classical_iface,
+            src_mac=args.src_mac, dst_mac=args.dst_mac)
         print(json.dumps(result))
         return 0
 

@@ -42,7 +42,10 @@ def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
                  do_reconcile: bool = True, cascade_passes: int = 4,
                  finite_key: bool = False, eps_sec: float = 1e-9,
                  eps_cor: float = 1e-15, auth_key: str | None = None,
-                 channel_delay: int = 0) -> dict:
+                 channel_delay: int = 0, classical_transport: str = "tcp",
+                 classical_iface: str | None = None,
+                 src_mac: str | None = None,
+                 dst_mac: str | None = None) -> dict:
     """Run one side of a distributed E91/BBM92 session; return the result dict.
 
     ``channel_delay`` (ps) turns on lookahead pacing: every classical message
@@ -53,7 +56,13 @@ def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
     spec = _MODES[mode]
     key_codes = set(spec["key"])
     fk_eps = {"eps_sec": eps_sec, "eps_cor": eps_cor} if finite_key else None
-    link = Link(auth_key=auth_key)
+    if classical_transport == "l2":
+        from .l2_link import ReliableLink
+        c_iface = classical_iface or ("veth1" if role == 0 else "veth3")
+        link = ReliableLink(auth_key=auth_key, interface=c_iface,
+                            src_mac=src_mac, dst_mac=dst_mac)
+    else:
+        link = Link(auth_key=auth_key)
     if role == 1:                       # Bob listens; Alice connects (as in BB84)
         link.serve(host, port)
     else:
@@ -77,6 +86,7 @@ def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
 
     result.update({"role": role, "name": name, "mode": mode,
                    "quantum_transport": "entangled-state-service",
+                   "classical_transport": classical_transport,
                    "tx_frames": link.tx_count, "rx_frames": link.rx_count,
                    "authenticated": auth_key is not None,
                    "auth_failures": link.auth_failures,
