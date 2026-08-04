@@ -116,6 +116,35 @@ def test_ethernet_min_frame_padding_is_stripped():
         close_links(server, client)
 
 
+def test_truncated_frame_is_dropped_and_resent_not_silently_corrupted():
+    # The mirror image of the padding case: a frame that declares MORE payload than
+    # it carries. Slicing to the declared length silently yields a SHORT payload, and
+    # _handle_data ACKs *before* reassembly -- so accepting it would make the sender
+    # stop resending and deliver a corrupt message for good (an unauthenticated link
+    # has no integrity check to notice). It must be dropped so the retry timer
+    # recovers it. Truncate the first DATA frame on the wire and assert the message
+    # still arrives BYTE-FOR-BYTE.
+    server, client, _, client_backend = connected_links()
+    truncated = False
+
+    def truncate_once(data):
+        nonlocal truncated
+        packet_type = _HEADER.unpack_from(data)[2]
+        if packet_type == _DATA and not truncated:
+            truncated = True
+            return [data[:-10]]        # 10 bytes lost in flight
+        return [data]
+
+    client_backend.transform = truncate_once
+    payload = b'{"kind":"epoch_req","pad":"' + b"a" * 40 + b'"}'
+    client.send(payload)
+
+    assert truncated
+    assert server.recv_one() == payload    # resend recovered it, uncorrupted
+    assert server.short_frames == 1        # the bad frame was counted, not accepted
+    close_links(server, client)
+
+
 def test_messages_delivered_in_order_when_datagrams_reordered():
     server, client, _, client_backend = connected_links(fragment_size=64)
     held = []

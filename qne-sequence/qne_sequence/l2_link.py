@@ -239,6 +239,10 @@ class ReliableLink:
         self.tx_count = 0
         self.rx_count = 0
         self.auth_failures = 0
+        # Frames dropped for declaring more payload than they carried (truncated on
+        # the wire, or a corrupted length field). Non-zero means the peer is resending
+        # -- worth surfacing on a live run rather than silently retrying forever.
+        self.short_frames = 0
         self._auth = FrameAuthenticator(auth_key) if auth_key else None
         self._backend = backend
         self._fragment_size = fragment_size
@@ -418,7 +422,19 @@ class ReliableLink:
         # appended to small classical messages and corrupt them (e.g. a 20-byte
         # JSON frame -> "Extra data" on json.loads). TCP never saw this (length-
         # framed stream); raw 0x7102 does.
-        payload = packet[_HEADER.size : _HEADER.size + plen]
+        #
+        # A frame that does NOT carry the bytes it declares must be DROPPED, not
+        # accepted: the slice below would silently yield a short payload, and
+        # _handle_data ACKs *before* reassembly, so the sender would stop resending
+        # and the message would be corrupt for good. An unauthenticated link has no
+        # integrity check to notice; an authenticated one fails the HMAC and tears
+        # the link down rather than recovering. Dropping lets the retry timer resend.
+        # This also bounds a garbage/hostile plen (it is a uint32).
+        end = _HEADER.size + plen
+        if len(packet) < end:
+            self.short_frames += 1
+            return
+        payload = packet[_HEADER.size : end]
         if packet_type == _HELLO:
             self._backend.send(self._packet(_HELLO_ACK))
             with self._handshake_cv:
