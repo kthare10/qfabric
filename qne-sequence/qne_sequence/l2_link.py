@@ -42,9 +42,14 @@ ETHERTYPE_CLASSICAL = 0x7102
 _DEFAULT_FRAGMENT_SIZE = 1400
 _DEFAULT_ACK_TIMEOUT = 0.02
 _DEFAULT_MAX_RETRIES = 50
-_HEADER = struct.Struct("!2sBBQHH")
+_HEADER = struct.Struct("!2sBBQHHI")  # magic,ver,type,seq,frag_index,frag_count,payload_len
 _MAGIC = b"QL"
-_VERSION = 1
+# v2 added the uint32 payload-length field to _HEADER (strips Ethernet min-frame
+# padding). The bump is deliberate: a v1 header has no length field, so a v1/v2
+# mix would misread payload bytes as the length. _handle_packet rejects any
+# frame whose version != _VERSION, so a mismatch fails cleanly (link times out)
+# instead of silently corrupting messages.
+_VERSION = 2
 _DATA = 1
 _ACK = 2
 _HELLO = 3
@@ -405,10 +410,15 @@ class ReliableLink:
     def _handle_packet(self, packet: bytes) -> None:
         if len(packet) < _HEADER.size:
             return
-        magic, version, packet_type, seq, frag_index, frag_count = _HEADER.unpack_from(packet)
+        magic, version, packet_type, seq, frag_index, frag_count, plen = _HEADER.unpack_from(packet)
         if magic != _MAGIC or version != _VERSION:
             return
-        payload = packet[_HEADER.size :]
+        # Slice to the declared length. Raw Ethernet pads frames below the 60-byte
+        # minimum with trailing zeros; without an explicit length those NULs get
+        # appended to small classical messages and corrupt them (e.g. a 20-byte
+        # JSON frame -> "Extra data" on json.loads). TCP never saw this (length-
+        # framed stream); raw 0x7102 does.
+        payload = packet[_HEADER.size : _HEADER.size + plen]
         if packet_type == _HELLO:
             self._backend.send(self._packet(_HELLO_ACK))
             with self._handshake_cv:
@@ -464,6 +474,7 @@ class ReliableLink:
             seq,
             frag_index,
             frag_count,
+            len(payload),
         ) + payload
 
     def close(self) -> None:

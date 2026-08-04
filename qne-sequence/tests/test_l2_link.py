@@ -26,7 +26,7 @@ import pytest
 from qne.auth import AuthError
 from qne_sequence.l2_link import LoopbackDatagram, ReliableLink
 
-_HEADER = struct.Struct("!2sBBQHH")
+_HEADER = struct.Struct("!2sBBQHHI")
 _DATA = 1
 
 
@@ -99,6 +99,23 @@ def test_large_payload_fragmented_and_reassembled():
     close_links(server, client)
 
 
+def test_ethernet_min_frame_padding_is_stripped():
+    # Raw Ethernet pads frames below the 60-byte minimum with trailing zeros.
+    # A small classical message (e.g. the 20-byte epoch_req JSON) therefore
+    # arrives with NUL padding appended; the header's payload-length field must
+    # let the receiver strip it, or json.loads sees "Extra data". Regression for
+    # the L2-classical BB84 hang.
+    server, client, _, _ = connected_links()
+    try:
+        msg = b'{"kind":"epoch_req"}'          # 20 bytes -> on-wire frame < 60
+        packet = ReliableLink._packet(_DATA, seq=0, frag_index=0,
+                                      frag_count=1, payload=msg)
+        server._handle_packet(packet + b"\x00" * 12)   # simulate Ethernet padding
+        assert server.recv_one() == msg                # padding stripped, no extra bytes
+    finally:
+        close_links(server, client)
+
+
 def test_messages_delivered_in_order_when_datagrams_reordered():
     server, client, _, client_backend = connected_links(fragment_size=64)
     held = []
@@ -128,7 +145,7 @@ def test_resend_recovers_dropped_fragment():
 
     def drop_once(data):
         nonlocal dropped
-        _, _, packet_type, _, frag_index, _ = _HEADER.unpack_from(data)
+        _, _, packet_type, _, frag_index, _, _ = _HEADER.unpack_from(data)
         if packet_type == _DATA and frag_index == 1 and not dropped:
             dropped = True
             return []
