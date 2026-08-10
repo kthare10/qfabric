@@ -323,6 +323,11 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         "rx_frames": link.rx_count,
         "authenticated": auth_key is not None,
         "auth_failures": link.auth_failures,
+        # Raw 0x7102 frames dropped for declaring more payload than they carried,
+        # i.e. truncated in flight (always 0 on the TCP transport). Non-zero means
+        # the classical link is resending -- the run is still correct, but the wire
+        # is lossy, which would otherwise hide behind slower time-to-key.
+        "short_frames": link.short_frames,
         "remote_access_errors": len(tl.remote_access_errors),
         # emulation-fidelity certificate: with channel_delay > 0, every frame
         # should fire at exactly t_send + delay (late_events == 0 means the

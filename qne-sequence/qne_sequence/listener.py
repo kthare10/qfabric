@@ -52,6 +52,11 @@ class Link:
         self.tx_count = 0
         self.rx_count = 0
         self.auth_failures = 0
+        # Always 0 here: TCP is a length-framed stream, so a frame cannot arrive
+        # carrying fewer bytes than it declares (ReliableLink's raw 0x7102 datagrams
+        # can — see l2_link.short_frames). Present so both transports report the same
+        # result-dict schema and callers never have to branch on transport.
+        self.short_frames = 0
 
     def serve(self, host: str, port: int, timeout: float = 30.0) -> None:
         # Match ClassicalServer's family detection: an IPv6 literal (or empty
