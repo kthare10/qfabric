@@ -259,7 +259,7 @@ parameters p_Z, p_μ1, μ₁, μ₂ vs. attenuation is shown in Figs. 3–4).
 
 ## Relation to the current qfabric implementation
 
-`qne/decoy.py` currently implements the **asymptotic, 3-intensity Lo–Ma–Chen + GLLP** rate
+`qne/decoy.py` currently implements the **asymptotic, 3-intensity Ma–Qi–Zhao–Lo + GLLP** rate
 (signal / decoy / vacuum, `decoy_state_key_rate`) — no finite-key terms. The Rusca analysis
 differs on three axes, which is what makes it worth porting:
 

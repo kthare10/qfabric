@@ -3,7 +3,7 @@
 Alice's weak-coherent source draws Poisson(μ) photons per pulse at three
 intensities; fiber loss thins them per photon; Bob's detector fires on
 1 − (1−η)^n. The measured per-intensity gains and error rates — not analytic
-formulas — feed the Lo–Ma–Chen Y1/e1 bounds and the GLLP rate, closing the
+formulas — feed the Ma–Qi–Zhao–Lo Y1/e1 bounds and the GLLP rate, closing the
 "decoy is analysis-only" gap: the whole decoy pipeline now runs on live traffic.
 """
 
@@ -70,7 +70,7 @@ def test_two_node_decoy_bb84():
     assert abs(g["signal"] - (1 - math.exp(-eta_tot * MU_S))) < 0.03
     assert abs(g["decoy"] - (1 - math.exp(-eta_tot * MU_D))) < 0.02
 
-    # Lo-Ma-Chen bounds on live data: single-photon yield certified, low e1
+    # Ma-Qi-Zhao-Lo bounds on live data: single-photon yield certified, low e1
     assert d["Y1_lower"] > 0.0
     assert d["e1_upper"] < 0.15
     assert d["secure_key_rate"] > 0.0

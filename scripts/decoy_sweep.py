@@ -7,7 +7,7 @@
 """Decoy-state BB84 sweep — secure key rate vs channel efficiency and noise.
 
 Monte-Carlo the weak-coherent (Poisson-source) channel at three intensities and
-apply the Lo-Ma-Chen decoy bounds (qne/decoy.py), one axis at a time with
+apply the Ma-Qi-Zhao-Lo decoy bounds (qne/decoy.py), one axis at a time with
 repetitions (mean +/- std). Slice-free and reproducible.
 
     python scripts/decoy_sweep.py                 # full matrix -> results/decoy_scenarios.json

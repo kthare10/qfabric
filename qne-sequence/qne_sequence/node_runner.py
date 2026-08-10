@@ -419,7 +419,7 @@ def main(argv=None) -> int:
     ap.add_argument("--decoy", action="store_true",
                     help="decoy-state source on the live transport: Poisson(mu) "
                          "photons per pulse at 3 intensities, measured gains/QBERs "
-                         "feed the Lo-Ma-Chen/GLLP analysis (key from signal pulses)")
+                         "feed the Ma-Qi-Zhao-Lo/GLLP analysis (key from signal pulses)")
     ap.add_argument("--mu-signal", type=float, default=0.6)
     ap.add_argument("--mu-decoy", type=float, default=0.1)
     ap.add_argument("--mu-vacuum", type=float, default=0.001)

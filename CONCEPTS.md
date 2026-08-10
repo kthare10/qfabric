@@ -505,7 +505,7 @@ R ≥ q·[ Q₁(1 − h(e₁)) − Q_μ·f_EC·h(E_μ) ]     with  Q₁ = μ·e^
 
 **In the code.**
 
-- `qne/decoy.py::decoy_state_key_rate` — the Lo–Ma–Chen bounds, kept in their full
+- `qne/decoy.py::decoy_state_key_rate` — the Ma–Qi–Zhao–Lo bounds (PRA 72, 012326, Eqs. 34, 37), kept in their full
   form (the common truncation that drops the Q_s and Y₀ background terms
   *overestimates* Y₁; this implementation retains them — see docstring).
 - **On the live transport** (`distributed_qkd.py`): Alice's `make_pulses` draws a
@@ -766,7 +766,7 @@ hook it would plug into.
 | Cascade reconciliation | `qne/cascade.py`; network driver `qne/reconcile.py` |
 | Toeplitz privacy amplification | `qne/privacy.py::toeplitz_amplify` |
 | Secret-length accounting | `qne/reconcile.py::secure_key_bits` |
-| Decoy states (Lo–Ma–Chen / GLLP) | `qne/decoy.py`; live source in `distributed_qkd.py::make_pulses`/`detect_pulse` |
+| Decoy states (Ma–Qi–Zhao–Lo / GLLP) | `qne/decoy.py`; live source in `distributed_qkd.py::make_pulses`/`detect_pulse` |
 | Finite-key (Serfling + TLGR) | `qne/finite_key.py` |
 | Authenticated classical channel | `qne/auth.py` (+ `qne/channel.py`, `qne-sequence` `Link`) |
 | E91/BBM92 protocol | `e91.py`, `distributed_e91.py` |

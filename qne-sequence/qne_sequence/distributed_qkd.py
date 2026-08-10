@@ -406,7 +406,7 @@ class DistributedBB84(BB84):
 
             # Decoy-state analysis on the LIVE statistics: measured per-intensity
             # gains (from Bob's full detection set) + measured E_signal/E_decoy
-            # feed the Lo–Ma–Chen bounds -> GLLP rate (qne/decoy.py, unchanged).
+            # feed the Ma–Qi–Zhao–Lo bounds -> GLLP rate (qne/decoy.py, unchanged).
             decoy_summary = None
             if self.decoy is not None and "detected_sequences" in msg.payload:
                 from qne.decoy import decoy_state_key_rate
