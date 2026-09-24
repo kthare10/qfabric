@@ -262,41 +262,28 @@ control), `test_three_node_repeater.py` (all of it across processes), notebooks
 #### 6.1 · From swapping to *computing* — teleportation and the non-local CNOT
 
 **Concept.** The same machinery buys something other than a key. Two QPUs at
-different sites share no qubit, so no gate between them is possible — unless they
-spend entanglement. Two ways to spend it:
+different sites share no qubit, so no gate between them is possible unless they spend
+entanglement — either **teleporting** a state (BSM the data qubit against your half of
+a pair, send 2 bits, the peer applies X<sup>m₂</sup>Z<sup>m₁</sup>; the data qubit is
+consumed) or running a **telegate**, the non-local CNOT built from a cat-entangler and
+cat-disentangler (1 bit each way, and the control never leaves its node — which is why
+a distributed compiler emits telegates, not teleports). Teleporting is swapping with a
+data qubit in place of a link half, which is why the validated repeater code already
+contained the primitive. Worked through in [`PRIMER.md`](PRIMER.md) §4.4.
 
-- **Teleport** (state transfer). BSM the data qubit against your half of a pair,
-  send the 2 herald bits, the peer applies X<sup>m₂</sup>Z<sup>m₁</sup> — and *its*
-  half now holds your state. This is swapping with a data qubit in place of a link
-  half, which is why the validated repeater code already contained the primitive.
-  Cost: 1 pair + 2 classical bits. The data qubit is consumed (no-cloning).
-- **Telegate** (non-local CNOT), the cat-entangler / cat-disentangler construction:
-  CNOT your control onto your half of the pair and Z-measure it; the peer applies
-  X<sup>m₁</sup>, so its half now carries your control's *basis value* (legal — it
-  copies a basis value, not an unknown state), uses it as the control of a local
-  CNOT onto its target, then X-measures it away; you clear the phase kickback with
-  Z<sup>m₂</sup>. Cost: 1 pair + 1 bit each way. **The control never leaves its
-  node**, which is why a distributed compiler emits telegates, not teleports.
+Two properties matter here, and both are asserted by tests:
 
-Noise carries over unchanged. A Werner-w pair is wrong with probability 3(1−w)/4,
-and the three faulty Bell states land as Pauli errors: Z → phase error on the
-control, X → bit error on the target, XZ → both. So bit-error = phase-error =
-**(1−w)/2** — *the same curve as the E91 QBER*. A distributed gate and a distributed
-key degrade with distance identically, which is the platform's point: pair quality
-is one number that prices both.
-
-The classical plane is load-bearing here, but not in the way it first looks.
-Because the corrections are *Paulis*, a bit that arrives late does not have to
-become an error: the receiver can hold the qubit and apply it on arrival, carry it
-as a tracked **Pauli frame** through later Clifford gates, or — if the qubit is
-already measured — fold it into the recorded outcome by XOR (`correct_outcome`),
-since an X correction flips a Z-basis result and a Z correction flips an X-basis
-one. That is the same move §6 describes for a repeater chain, which XOR-composes L
-heralds and corrects once at the end. So **herald latency is a memory-time cost,
-not an error source**: what has to survive the wait is the qubit (or the frame).
-An error appears only when the correction is permanently unavailable, or arrives
-after the result has been irreversibly consumed — and *that* costs 50%, because
-each correction bit protects exactly one Pauli channel.
+- **One number prices a gate and a key.** A Werner-w pair is wrong with probability
+  3(1−w)/4, and the three faulty Bell states land as Pauli errors — Z → phase error on
+  the control, X → bit error on the target, XZ → both — so bit-error = phase-error =
+  **(1−w)/2**, the same curve as the E91 QBER (§4).
+- **Late is not lost.** Because the corrections are Paulis, a bit that misses its gate
+  can be applied on arrival, carried as a tracked **Pauli frame** through later Clifford
+  gates, or folded into an already-recorded outcome by XOR (`correct_outcome`) — the
+  same move §6 makes when it XOR-composes L heralds and corrects once at the end. So
+  herald latency is a memory-time cost, not an error source. An error appears only when
+  a correction is permanently unavailable or arrives after the result was consumed, and
+  *that* costs 50%, because each bit protects exactly one Pauli channel.
 
 **In the code.**
 
@@ -538,7 +525,7 @@ by CHSH).
 **Concept.** A real attenuated laser emits **Poisson(μ)** photons, so ~μ²/2 of pulses
 carry two or more identical ones — and the **photon-number-splitting attack** lets Eve
 siphon one, store it, and measure after the basis announcement: perfect information,
-zero disturbance ([`PRIMER.md`](PRIMER.md) §2.8).
+zero disturbance ([`PRIMER.md`](PRIMER.md) §2.8c).
 
 The **decoy-state method** (Lo–Ma–Chen 2005) defeats PNS statistically: transmit at
 several intensities (signal μₛ, weak decoy μ_d, near-vacuum μᵥ) chosen randomly and
@@ -575,7 +562,7 @@ R ≥ q·[ Q₁(1 − h(e₁)) − Q_μ·f_EC·h(E_μ) ]     with  Q₁ = μ·e^
 
 **Concept.** Shor–Preskill is asymptotic — it treats the sampled QBER as the true one.
 A real run of n key bits with k sampled needs two corrections ([`PRIMER.md`](PRIMER.md)
-§2.8): a **parameter-estimation penalty**, since the sample may have missed errors, via
+§2.8b): a **parameter-estimation penalty**, since the sample may have missed errors, via
 the Serfling bound for sampling without replacement
 
 ```
@@ -608,7 +595,7 @@ asymptote, zero-at-small-n), `test_two_node_auth_finite.py`, notebook
 **Concept.** BB84's proof *assumes* an **authenticated** classical channel — not
 secret, authenticated. Without it Eve ignores the photons entirely and
 man-in-the-middles the sifting conversation, running the protocol separately with each
-party ([`PRIMER.md`](PRIMER.md) §2.8). Production QKD authenticates with
+party ([`PRIMER.md`](PRIMER.md) §2.8a). Production QKD authenticates with
 information-theoretic Wegman–Carter MACs keyed from previously distilled secret;
 QFabric models the same wire discipline with HMAC-SHA256 under a pre-shared key —
 computationally rather than information-theoretically secure, but byte-for-byte the

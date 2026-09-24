@@ -12,7 +12,8 @@ misconception. Read it in order; each part builds on the last.
 - **Part 1** — the four quantum ground rules everything else follows from
 - **Part 2** — BB84: turning those rules into an unbreakable shared secret
 - **Part 3** — entanglement: the genuinely strange resource
-- **Part 4** — repeaters: why distance is the enemy, and how to beat it
+- **Part 4** — repeaters: why distance is the enemy, how to beat it, and what
+  else entanglement buys you once you have it
 - **Part 5** — the big picture: what a quantum internet actually is
 
 No code here. When you're ready to see how each concept is implemented in this
@@ -655,7 +656,86 @@ roadmap adds **entanglement distillation** (burn several mediocre pairs to
 forge one good one — pushing f back up between hops, at the cost of yet more
 classical round trips) — at which point arbitrary distances open up.
 
-## 4.4 · Why this is a networking problem
+## 4.4 · Spending entanglement: distributed quantum computing
+
+Everything so far spends entanglement on a *key*. It buys something else too.
+
+Picture two quantum processors in different buildings. Each holds its own qubits;
+neither holds the other's. You want to run a two-qubit gate — say a CNOT — with the
+control on machine A and the target on machine B. You cannot. A gate acts on a
+*joint* state, and these two machines have no joint state. Worse, you cannot simply
+mail the qubit over: there is no wire that carries a qubit, which is the whole
+problem Part 4 started with.
+
+A shared Bell pair is the way out, and there are two ways to spend it.
+
+**Teleportation** moves a *state*. A holds an unknown qubit |ψ⟩ plus her half of a
+Bell pair. She performs a Bell-state measurement on those two qubits together —
+the same joint "which Bell state are these?" measurement a repeater station makes
+(§4.2) — and gets two bits. She sends the two bits to B. B applies a Pauli
+correction picked by those bits, and *his* half of the pair is now |ψ⟩.
+
+Three things about that are worth pausing on.
+
+- **The original is gone.** A's Bell measurement destroyed |ψ⟩. Nothing was copied,
+  so no-cloning is intact. Teleportation is a *move*, never a duplicate.
+- **The two classical bits are mandatory.** Without them, B's qubit is an even
+  mixture over four possibilities — noise. Exactly the herald lesson from §4.2.
+- **Nothing outran light.** The state only becomes usable when the two bits arrive,
+  and they travel over an ordinary classical link at ordinary speed. The common
+  "teleportation is faster-than-light" claim dies right here.
+
+**The non-local CNOT** — "telegate" — is the one a distributed computer actually
+wants, and it is cleverer. A does *not* send her control qubit anywhere. She
+entangles it with her half of the pair and measures that half, sending one bit. B
+uses that bit to make his half carry the control's *value in the computational
+basis* — which is legal, because copying a basis value is not copying an unknown
+state — then uses it as the control of an ordinary local CNOT onto his target, and
+measures it away, sending one bit back. A clears a leftover phase with it.
+
+Net effect: a CNOT ran between two machines that share no qubit. Cost: one Bell
+pair and one classical bit each way. **The control stayed on A** and is still there
+for the rest of A's circuit. That is why a compiler splitting a program across sites
+emits telegates rather than teleports.
+
+### The price, in the same currency as a key
+
+A noisy pair costs you the same way it costs a key. With Werner parameter *w*
+(§3.4), a distributed gate fails at
+
+```
+error = (1 − w)/2
+```
+
+which is the identical curve as the QKD error rate (§3.4, §2.4). One number prices
+both services on a link. At w = 0.95 that is a 2.5% error per non-local gate — and
+errors compound: a circuit needing 20 of them succeeds about 0.975²⁰ ≈ **60%** of the
+time. Distributed algorithms are therefore written to need as few cross-site gates as
+possible, which is exactly how a classical distributed system is written to need as
+few cross-datacenter round trips as possible.
+
+### Late is not lost — and why that matters
+
+Here is the part that surprises networking people, because it runs the opposite way
+from the herald lesson.
+
+The corrections in both protocols are *Pauli* operations. If one arrives late, the
+receiver has options: hold the qubit and apply it when it lands, carry it forward as
+a bookkeeping note — a **Pauli frame** — through later gates, or, if the qubit was
+already measured, just flip the recorded bit. A late correction can be repaired with
+an XOR after the fact.
+
+So classical latency here is **not** an error source. It is a *memory* cost: the
+qubit has to stay coherent while the correction catches up. Real quantum memories
+hold coherence for microseconds to milliseconds, and a wide-area round trip is tens
+of milliseconds — so it is the waiting, not the fiber, that kills a distributed
+computation at range. An actual error appears only when a correction is lost for
+good, or turns up after the result has already been used for something.
+
+That is the sharpest form of Part 4's thesis: the quantum layer's limit is set by
+the classical layer's clock.
+
+## 4.5 · Why this is a networking problem
 
 Step back and look at what Part 4 actually contains, with your systems hat on:
 
@@ -666,7 +746,9 @@ Step back and look at what Part 4 actually contains, with your systems hat on:
   contents *decay in real time* (ARQ with a TTL measured in physics),
 - **batching and rates** dictated by finite-key statistics (§2.8b),
 - chatty **error correction** whose cost is RTT-bound (§2.6),
-- and **authentication** overhead on every classical byte (§2.8a).
+- **authentication** overhead on every classical byte (§2.8a),
+- and, once you spend the entanglement on computing rather than keys (§4.4),
+  **correction traffic whose latency is charged against memory coherence**.
 
 Every one of these is a classical networking concern, and the quantum layer's
 performance is *gated* by them. A quantum network is not a replacement for the
@@ -699,8 +781,9 @@ subsuming the last:
    of arbitrary qubit states on demand; blind/delegated quantum computing
    (use a remote quantum computer without revealing your data or program).
 4. **Distributed quantum computing** — networked quantum processors acting as
-   one machine; entanglement-linked telescopes and clock networks; sensor
-   arrays with precision beyond any classical limit.
+   one machine (§4.4 works through how a gate actually crosses between them);
+   entanglement-linked telescopes and clock networks; sensor arrays with
+   precision beyond any classical limit.
 
 Stage 1 is products; stage 2 is prototypes; stages 3–4 are laboratories and
 theory. The classical-network substrate, though, is common to all of them —
@@ -726,6 +809,10 @@ ENTANGLEMENT (Part 3): Bell pairs → CHSH > 2 certifies "no hidden values, no t
 DISTANCE (Part 4): fiber loss is exponential → no amplifiers allowed
         → entanglement swapping (BSM + classical herald) → repeater chains
         → cost: fidelity f^L → the hop cliff → memories, retries, distillation
+        │
+        ▼   spend the pairs on computing instead of keys
+  teleport a state (2 bits) · non-local CNOT (1 bit each way, control stays put)
+        → same error law (1−w)/2 → late corrections cost memory time, not fidelity
         ▼
 THE POINT: every arrow above leans on classical networking —
            heralds, parities, auth tags, batching — all riding real networks.
