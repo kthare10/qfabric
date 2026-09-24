@@ -31,7 +31,10 @@ from qne.config import ScenarioConfig
 from qne.detector import Detector
 from qne.metrics import MetricsCollector
 from qne.photon import PhotonPacket
-from qne.reconcile import ChannelRpc, bits_to_int, drive_cascade
+from qne.channel import ProtocolError
+from qne.finite_key import finite_key_length
+from qne.reconcile import (ChannelRpc, KeyVerificationError, bits_to_int,
+                           drive_cascade)
 
 
 class Bob:
@@ -52,6 +55,11 @@ class Bob:
         classical_port: int = 5100,
         auth_key: bytes | str | None = None,
         reconcile: bool = True,
+        finite_key: bool = False,
+        eps_sec: float = 1e-9,
+        eps_cor: float = 1e-15,
+        accept_timeout: float | None = None,
+        data_timeout: float | None = 600.0,
     ):
         self.config = config
         self.interface = interface
@@ -59,12 +67,21 @@ class Bob:
         self.classical_port = classical_port
         self.auth_key = auth_key
         self.reconcile = reconcile
+        # finite_key: size privacy amplification with the finite-key bound
+        # (qne/finite_key.py) instead of the asymptotic accounting.
+        self.finite_key = finite_key
+        self.eps_sec = eps_sec
+        self.eps_cor = eps_cor
+        self.accept_timeout = accept_timeout
+        self.data_timeout = data_timeout
+        self.finite_key_result = None
         self.final_key: int | None = None    # extracted secret (post Cascade + PA)
         self.detector = Detector(
             efficiency=config.detector.efficiency,
             dark_count_rate=config.detector.dark_count_rate,
+            detection_window=config.detector.detection_window,
             polarization_error=1.0 - config.channel.polarization_fidelity,
-            seed=config.seed + 100,
+            seed=config.derived_seed(100),
             basis_bias=config.protocol.basis_bias,
             dead_time=config.detector.dead_time,
             timing_jitter=config.detector.timing_jitter,
@@ -122,6 +139,7 @@ class Bob:
         print(f"Bob: Listening for photons on {self.interface}")
 
         received_count = 0
+        self._arrived_seqs: set[int] = set()
         while True:
             try:
                 frame, _addr = sock.recvfrom(65535)
@@ -135,6 +153,7 @@ class Bob:
                 continue  # Not a photon frame
 
             # Apply detector model
+            self._arrived_seqs.add(photon.sequence_num)
             event = self.detector.detect(photon)
 
             if event.detected:
@@ -150,9 +169,31 @@ class Bob:
             received_count += 1
 
         sock.close()
+
+        # A gated detector dark-counts in EVERY slot, not only where a frame
+        # arrived. Slots whose photon was lost in the channel (never seen here)
+        # still get a chance to click; without this the model under-reports dark
+        # counts exactly in the high-loss regime where they dominate QBER, and
+        # disagrees with the NetSquid / distributed-BB84 paths, which do model it.
+        seen = {rec.sequence_num for rec in self.detection_log}
+        seen.update(self._arrived_seqs)
+        dark_events = 0
+        for seq in range(self.config.protocol.num_photons):
+            if seq in seen:
+                continue
+            if self.detector.rng.random() < self.detector.dark_count_prob:
+                self.detection_log.append(BobRecord(
+                    sequence_num=seq,
+                    basis=int(self.detector.rng.random() >= self.detector.basis_bias),
+                    bit_value=int(self.detector.rng.integers(0, 2)),
+                ))
+                self.collector.record_received()
+                self.collector.record_dark_count()
+                dark_events += 1
         print(
             f"Bob: {received_count} photons arrived, "
-            f"{len(self.detection_log)} detected"
+            f"{len(self.detection_log) - dark_events} detected, "
+            f"{dark_events} dark counts in empty slots"
         )
 
     def _run_sifting(self) -> None:
@@ -165,7 +206,9 @@ class Bob:
         sifting/QBER accounting, qne.reconcile for Cascade + PA.
         """
         server = ClassicalServer(self.classical_host, self.classical_port,
-                                 auth_key=self.auth_key)
+                                 auth_key=self.auth_key,
+                                 accept_timeout=self.accept_timeout,
+                                 data_timeout=self.data_timeout)
         server.start()
         print(f"Bob: Waiting for Alice on {self.classical_host}:{self.classical_port}")
 
@@ -174,13 +217,14 @@ class Bob:
 
         protocol = BB84Protocol(
             sample_fraction=self.config.protocol.sample_fraction,
-            seed=self.config.seed + 1,
+            seed=self.config.derived_seed(1),
         )
 
         try:
             # Receive Alice's basis list
             msg = channel.recv_message()
-            assert msg["type"] == "alice_bases"
+            if msg.get("type") != "alice_bases":
+                raise ProtocolError(f"expected alice_bases, got {msg.get('type')!r}")
             alice_bases = {int(k): v for k, v in msg["bases"].items()}
 
             # Find matching bases. Dedup by sequence number — switch flooding
@@ -207,10 +251,25 @@ class Bob:
 
             # Disclose only a random sample: Bob picks the positions, Alice
             # returns her bits there; everything else stays secret.
-            n_sample = BB84Protocol.sample_size(
-                len(matching), self.config.protocol.sample_fraction)
-            sample = sorted(protocol.rng.choice(
-                matching, size=n_sample, replace=False).tolist()) if n_sample else []
+            bias = self.config.protocol.basis_bias
+            if bias != 0.5:
+                # Efficient BB84: the key comes from Z-Z matches ONLY. Every X-X
+                # match is disclosed (phase-error estimate e_x) plus a random
+                # sample of the Z-Z matches (bit-error estimate e_z). Keeping
+                # X-X bits in the key would leave them outside the 1-h(e_z)-h(e_x)
+                # bound (same policy as qne_sequence.distributed_qkd).
+                matching_z = [s for s in matching if bob_by_seq[s].basis == 0]
+                matching_x = [s for s in matching if bob_by_seq[s].basis == 1]
+                n_sample = BB84Protocol.sample_size(
+                    len(matching_z), self.config.protocol.sample_fraction)
+                z_sample = sorted(protocol.rng.choice(
+                    matching_z, size=n_sample, replace=False).tolist()) if n_sample else []
+                sample = sorted(matching_x + z_sample)
+            else:
+                n_sample = BB84Protocol.sample_size(
+                    len(matching), self.config.protocol.sample_fraction)
+                sample = sorted(protocol.rng.choice(
+                    matching, size=n_sample, replace=False).tolist()) if n_sample else []
             channel.send_message({
                 "type": "request_sample",
                 "sample_indices": sample,
@@ -234,7 +293,7 @@ class Bob:
 
             # Efficient BB84 (biased bases): split the sample by basis — Z is the
             # bit error, X the phase error — and rate with 1 - h(e_z) - h(e_x).
-            bias = self.config.protocol.basis_bias
+            qber_pa = None          # PA erases the PHASE error; unbiased: same as Q
             if bias != 0.5 and sample:
                 zi = [i for i, s in enumerate(sample) if alice_bases[s] == 0]
                 xi = [i for i, s in enumerate(sample) if alice_bases[s] == 1]
@@ -245,6 +304,7 @@ class Bob:
                 if qz.num_sampled and qx.num_sampled:
                     secure_fraction = BB84Protocol.efficient_secure_fraction(
                         qz.qber, qx.qber)
+                    qber_pa = qx.qber
                 else:
                     secure_fraction = 0.0
             else:
@@ -275,10 +335,22 @@ class Bob:
             corrections = bits_leaked = 0
             final = key_bits
             if do_reconcile:
-                final, corrections, bits_leaked = drive_cascade(
-                    ChannelRpc(channel), key_bits, qber_est.qber,
-                    self.config.seed + 303)
-                reconciled = True
+                finite = None
+                if self.finite_key:
+                    finite = {"n_sample": qber_est.num_sampled,
+                              "eps_sec": self.eps_sec, "eps_cor": self.eps_cor}
+                    self.finite_key_result = finite_key_length(
+                        len(key_bits), qber_est.num_sampled, qber_est.qber,
+                        leak_ec=0.0, eps_sec=self.eps_sec, eps_cor=self.eps_cor)
+                try:
+                    final, corrections, bits_leaked = drive_cascade(
+                        ChannelRpc(channel), key_bits, qber_est.qber,
+                        self.config.derived_seed(303), finite=finite, qber_pa=qber_pa)
+                    reconciled = True
+                except KeyVerificationError as e:
+                    corrections, bits_leaked = e.corrections, e.bits_leaked
+                    final, reconciled = [], False
+                    print(f"Bob: key verification FAILED after Cascade ({e})")
             self.final_key = bits_to_int(final) if reconciled else None
 
             self.collector.set_sifting_results(

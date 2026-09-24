@@ -211,6 +211,19 @@ def _spawn(role: str, port: int, seed: int, delay_ps: int,
     )
 
 
+
+_INVARIANT = ("qber", "sifted_bits", "key_bits", "num_sampled", "corrections",
+              "bits_leaked", "secure_key_bits")
+
+
+def _same_outcome(r_delay: dict, r_zero: dict) -> None:
+    """Delay-invariance: the modeled delay changed WHEN events fired, not WHAT the
+    protocol computed. The PA seed is drawn fresh per run (a seed-derived public
+    seed leaked the run seed -- 2026-09-21 review), so the *amplified* key differs
+    between runs; everything the protocol measured must not."""
+    for k in _INVARIANT:
+        assert r_delay.get(k) == r_zero.get(k), (k, r_delay.get(k), r_zero.get(k))
+
 def _run_pair(port: int, delay_ps: int, extra: tuple = ()) -> tuple[dict, dict]:
     bob = _spawn("bob", port, seed=2, delay_ps=delay_ps, extra=extra)
     alice = _spawn("alice", port, seed=1, delay_ps=delay_ps, extra=extra)
@@ -240,11 +253,11 @@ def test_two_node_lookahead_zero_late_and_delay_invariant_key():
     assert ra["timesync"]["role"] == "client" and ra["timesync"]["rtt_ns"] > 0
     assert rb["timesync"]["role"] == "master"
 
-    # delay-invariance: same seeds, no modeled delay -> identical key. The
-    # modeled delay changed WHEN events fired, not WHAT the protocol computed —
-    # i.e. the emulation behaves like the simulation.
+    # delay-invariance: same seeds, no modeled delay -> identical protocol outcome
+    # (the amplified key differs only by the fresh public PA seed).
     ra0, rb0 = _run_pair(_free_port(), 0)
-    assert ra0["key"] == rb0["key"] == ra["key"], (ra0["key"], rb0["key"], ra["key"])
+    assert ra0["key"] == rb0["key"] is not None
+    _same_outcome(ra, ra0)
 
 
 def test_e91_lookahead_zero_late_and_delay_invariant_key():
@@ -259,7 +272,8 @@ def test_e91_lookahead_zero_late_and_delay_invariant_key():
     assert ra["key"] == rb["key"] is not None
 
     ra0, rb0 = _run_pair(_free_port(), 0, extra=extra)
-    assert ra0["key"] == rb0["key"] == ra["key"]
+    assert ra0["key"] == rb0["key"] is not None
+    _same_outcome(ra, ra0)
 
 
 def _run_chain(port: int, delay_ps: int) -> dict[str, dict]:
@@ -322,4 +336,5 @@ def test_repeater_lookahead_zero_late_and_delay_invariant_key():
     assert r["alice"]["key"] == r["bob"]["key"] is not None
 
     r0 = _run_chain(_free_port(), 0)
-    assert r0["alice"]["key"] == r0["bob"]["key"] == r["alice"]["key"]
+    assert r0["alice"]["key"] == r0["bob"]["key"] is not None
+    _same_outcome(r["alice"], r0["alice"])

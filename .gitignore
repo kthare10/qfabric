@@ -41,6 +41,8 @@ secrets/
 !results/fabric_e91_bob.json
 !qne-sequence/results/sequence_scenarios.json
 !results/decoy_scenarios.json
+!results/timeline_2026-09-21/
+!results/timeline_2026-09-21/*
 *.pcap
 
 # Personal session tracking — never ship in the artifact
@@ -51,6 +53,7 @@ paper/
 
 # Internal review notes — keep local, don't ship
 REVIEW_*.md
+!REVIEW_2026-09-21.md
 
 # Intern-facing handouts — private, keep local
 ASSIGNMENT_*.md

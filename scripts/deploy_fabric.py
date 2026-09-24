@@ -36,15 +36,17 @@ def print(*args, **kwargs):
 
 import argparse
 import json
+import re
 import sys
 import time
+import traceback
 from pathlib import Path
 import os
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
-from qne.config import ScenarioConfig
+from qne.config import ChannelConfig, ScenarioConfig
 
 
 def loss_probability(distance_km: float, attenuation_db_per_km: float) -> float:
@@ -52,7 +54,9 @@ def loss_probability(distance_km: float, attenuation_db_per_km: float) -> float:
 
     Used to size the P4 loss threshold per distance and to report analytical loss.
     """
-    return 1.0 - 10 ** (-(attenuation_db_per_km * distance_km) / 10.0)
+    return ScenarioConfig(channel=ChannelConfig(
+        distance_km=distance_km, attenuation_db_per_km=attenuation_db_per_km,
+    )).loss_probability
 
 
 def get_fablib():
@@ -289,7 +293,8 @@ def run_all_scenarios_on_fabric(slice_obj, scenarios_dir="validation/scenarios",
     """Run EVERY scenario in `scenarios_dir` end-to-end on the slice.
 
     Sweep files (those whose name contains 'sweep') are expanded into their
-    individual points. For each point this reconfigures the switch loss threshold,
+    individual points. The switch is configured once with the first point's loss
+    threshold. Each point updates the threshold in place with set_channel_loss,
     runs BB84, and (optionally) the 4-way cross-validation. Results accumulate in
     results/all_scenarios.json (rewritten after each point, so partial progress
     survives an interruption). Returns the list of per-point result rows.
@@ -320,6 +325,15 @@ def run_all_scenarios_on_fabric(slice_obj, scenarios_dir="validation/scenarios",
     print(f"Discovered scenarios in {scenarios_dir} -> {len(points)} runs")
 
     rows = []
+    if points:
+        first_point = points[0][0]
+        first_config = ScenarioConfig(channel=ChannelConfig(
+            distance_km=first_point.distance_km,
+            attenuation_db_per_km=first_point.attenuation_db_per_km,
+        ))
+        amac, bmac, sw_a, sw_b, _, _ = configure_switch(
+            slice_obj, first_config.loss_threshold_u32,
+        )
     for i, (vs, group) in enumerate(points, 1):
         print(f"\n##### [{i}/{len(points)}] {group} : {vs.name} "
               f"(dist={vs.distance_km} km, atten={vs.attenuation_db_per_km} dB/km, "
@@ -348,8 +362,9 @@ def run_all_scenarios_on_fabric(slice_obj, scenarios_dir="validation/scenarios",
             (results_dir / f).unlink(missing_ok=True)
 
         config = ScenarioConfig.from_dict(cfg_dict)
+        error_details = {}
         try:
-            amac, bmac, sw_a, sw_b, _, _ = configure_switch(slice_obj, config.loss_threshold_u32)
+            set_channel_loss(slice_obj, config.loss_threshold_u32)
             run_bb84(slice_obj, rel, amac, bmac, sw_alice_mac=sw_a, bob_data_ip="10.10.1.2")
             if cross_validate:
                 backends = run_cross_validation_on_fabric(slice_obj, rel)
@@ -357,6 +372,7 @@ def run_all_scenarios_on_fabric(slice_obj, scenarios_dir="validation/scenarios",
                 m = load_fabric_result(results_dir / "fabric_bob_results.json")
                 backends = [m] if m else []
         except Exception as e:
+            error_details = {"error": str(e), "traceback": traceback.format_exc()}
             print(f"  !! point {group}:{vs.name} failed: {e} — recording as incomplete")
             backends = []
 
@@ -376,6 +392,7 @@ def run_all_scenarios_on_fabric(slice_obj, scenarios_dir="validation/scenarios",
             "attenuation_db_per_km": vs.attenuation_db_per_km,
             "polarization_fidelity": vs.polarization_fidelity,
             "backends": [b.to_payload() for b in backends if b],
+            **error_details,
         })
         # Rewrite after every point so an interrupted sweep keeps what it has.
         (results_dir / "all_scenarios.json").write_text(_json.dumps(rows, indent=2))
@@ -454,8 +471,16 @@ def install_deps(slice_obj, build_bmv2=True):
     print("  BMv2 installation complete")
 
 
+def _bmv2_cli(switch) -> str:
+    """Select the CLI for a running BMv2 container or the host-built switch."""
+    running, _ = switch.execute(
+        "sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -x bmv2 || true", quiet=True)
+    return ("sudo docker exec -i bmv2 simple_switch_CLI" if running.strip() == "bmv2"
+            else "/usr/local/bin/simple_switch_CLI")
+
+
 def configure_switch(slice_obj, threshold: int):
-    """Compile P4 program and start BMv2 on the switch node."""
+    """Compile/start BMv2, or reuse its running container, then configure tables."""
     print(f"\n=== Configuring switch (threshold={threshold}) ===")
 
     switch = slice_obj.get_node("switch")
@@ -490,6 +515,7 @@ def configure_switch(slice_obj, threshold: int):
     home = home_out.strip()
     json_rel = "p4/bmv2/quantum_channel.json"
     image = os.environ.get("QFABRIC_BMV2_IMAGE", "").strip()
+    cli = _bmv2_cli(switch)
 
     if image:
         # ---- Prebuilt Docker image: no per-deploy source build ----
@@ -519,7 +545,9 @@ def configure_switch(slice_obj, threshold: int):
             log_out, _ = switch.execute("sudo docker logs --tail 20 bmv2 2>&1 || true", quiet=True)
             print(f"  ERROR: BMv2 container not running!\n  Logs: {log_out.strip()}")
             raise RuntimeError("BMv2 (docker) failed to start")
-        cli = "sudo docker exec -i bmv2 simple_switch_CLI"
+        cli = _bmv2_cli(switch)
+    elif cli.startswith("sudo docker exec"):
+        print("  Reusing running BMv2 container (QFABRIC_BMV2_IMAGE is unset)")
     else:
         # ---- Build-from-source path (p4c-bm2-ss + systemd-run) ----
         print("  Compiling P4 program...")
@@ -552,14 +580,8 @@ def configure_switch(slice_obj, threshold: int):
             log_out, _ = switch.execute("sudo journalctl -u bmv2 --no-pager -n 20 2>/dev/null", quiet=True)
             print(f"  ERROR: BMv2 failed to start!\n  Journal: {log_out.strip()}")
             raise RuntimeError("BMv2 failed to start")
-        cli = "/usr/local/bin/simple_switch_CLI"
 
     # ---- Configure tables (shared by both paths) ----
-    # Both start paths above restart BMv2 fresh (docker `rm -f`+`run`, or stop+systemd-run),
-    # so these table_adds run on an empty table. To CHANGE the loss on an already-running
-    # switch (e.g. a distance sweep) use set_channel_loss (in-place table_modify) — do NOT
-    # re-run configure_switch per point: table_add rejects the duplicate match key, and its
-    # systemd/pkill stop can't restart a Docker-run BMv2, so the loss would freeze.
     print("  Configuring tables...")
     for cmd in (
         f"table_add quantum_channel_params set_channel_params 0 => {threshold} 1 {sw_bob_mac_hex} {bob_mac_hex}",
@@ -584,19 +606,15 @@ def set_channel_loss(slice_obj, threshold: int):
     is heavy AND unreliable: its systemd/pkill stop can't touch a Docker-run BMv2, and
     the re-`table_add` is rejected on the duplicate match key — so the threshold stays
     frozen at the FIRST distance and every point runs at that loss (flat sift-yield vs
-    distance). This clears + re-adds ONLY the loss entry through the running switch's
+    distance). This modifies ONLY the loss entry through the running switch's
     CLI, so loss actually tracks distance. Run configure_switch once first (notebook 1)
-    to compile + start BMv2. `threshold` is int(P_loss * 2**32); see loss_probability().
+    to compile + start BMv2. `threshold` is the clamped ScenarioConfig.loss_threshold_u32.
     """
     switch = slice_obj.get_node("switch")
     bob = slice_obj.get_node("bob")
     bob_mac_hex = "0x" + bob.get_interface(network_name="net_switch_bob").get_mac().replace(":", "")
     sw_bob_mac_hex = "0x" + switch.get_interface(network_name="net_switch_bob").get_mac().replace(":", "")
-    # Reach whichever switch is running: the Docker container or a host-built binary.
-    running, _ = switch.execute(
-        "sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -x bmv2 || true", quiet=True)
-    cli = ("sudo docker exec -i bmv2 simple_switch_CLI" if running.strip() == "bmv2"
-           else "/usr/local/bin/simple_switch_CLI")
+    cli = _bmv2_cli(switch)
     # table_MODIFY updates the existing entry (handle 0) IN PLACE — NOT table_clear +
     # table_add: a clear leaves the table momentarily empty, and an empty
     # quantum_channel_params defaults to drop_photon, so any failure between the two
@@ -608,7 +626,9 @@ def set_channel_loss(slice_obj, threshold: int):
     # entry is stale/missing and the run would be silently wrong). Fail loudly instead.
     dump, _ = switch.execute(
         f'echo "table_dump quantum_channel_params" | {cli} --thrift-port 9090', quiet=True)
-    if f"{threshold:08x}" not in dump.lower().replace(" ", ""):
+    action_data = re.findall(r"\bset_channel_params\b([^\r\n]*)", dump, re.IGNORECASE)
+    tokens = re.findall(r"\b(?:0x[0-9a-f]+|[0-9]+)\b", "\n".join(action_data), re.IGNORECASE)
+    if not any(int(token, 0) == threshold for token in tokens):
         raise RuntimeError(
             f"set_channel_loss: threshold {threshold} (0x{threshold:08x}) did not take — "
             f"is the entry present? Run configure_switch first (notebook 1). Dump:\n{dump}")
@@ -622,6 +642,7 @@ def setup_dataplane_ips(slice_obj, alice_mac: str, bob_mac: str):
     network instead of the FABRIC management network (which blocks arbitrary
     TCP ports between sites).
     """
+    # alice_mac and bob_mac are unused, but notebook callers pass them positionally.
     print("\n=== Setting up data-plane IPs ===")
 
     alice_node = slice_obj.get_node("alice")
@@ -704,6 +725,7 @@ def setup_dataplane_ips(slice_obj, alice_mac: str, bob_mac: str):
 def run_bb84(slice_obj, scenario_path: str, alice_mac: str, bob_mac: str,
              sw_alice_mac: str = None, bob_data_ip: str = None):
     """Run BB84 protocol: start Bob, then Alice."""
+    # bob_mac is unused, but scripts and notebooks pass it positionally.
     print("\n=== Running BB84 protocol ===")
 
     alice_node = slice_obj.get_node("alice")
@@ -1167,10 +1189,31 @@ def setup_repeater_bridge(slice_obj, station_ip="10.10.1.3"):
         f"sudo sysctl -qw net.ipv4.conf.{if_b}.send_redirects=0 2>/dev/null; "
         # don't let bridged frames get dropped by ip/nftables (br_netfilter)
         "sudo sysctl -qw net.bridge.bridge-nf-call-iptables=0 2>/dev/null; "
-        # BMv2's Docker install usually leaves FORWARD on DROP -> open it
-        "sudo iptables -P FORWARD ACCEPT; sudo iptables -F FORWARD",
+        "sudo iptables -P FORWARD ACCEPT",
         quiet=True,
     )
+    # Forwarding permission gets its OWN call: the BMv2 Docker install leaves
+    # FORWARD on DROP and the daemon re-applies its chains (and that policy) on
+    # every re-sync, so `-P ACCEPT` alone silently reverts and alice<->bob dies
+    # mid-run -- exactly how a 2026-09-22 chain run failed (the setup's ping test
+    # passed, Docker then restored DROP, and alice's TCP SYNs went unanswered).
+    # DOCKER-USER is the chain Docker promises to preserve and consult FIRST, so
+    # the data-plane allow lives there. Delete-then-insert keeps it idempotent
+    # without relying on `iptables -C` inside a long `;`-joined string.
+    switch.execute(
+        "sudo iptables -N DOCKER-USER 2>/dev/null || true; "
+        "sudo iptables -C FORWARD -j DOCKER-USER 2>/dev/null || "
+        "sudo iptables -I FORWARD -j DOCKER-USER || true; "
+        "sudo iptables -D DOCKER-USER -s 10.10.1.0/24 -d 10.10.1.0/24 -j ACCEPT "
+        "2>/dev/null || true; "
+        "sudo iptables -I DOCKER-USER 1 -s 10.10.1.0/24 -d 10.10.1.0/24 -j ACCEPT",
+        quiet=True,
+    )
+    rules, _ = switch.execute("sudo iptables -S DOCKER-USER", quiet=True)
+    if "10.10.1.0/24" not in rules:
+        raise RuntimeError(
+            "could not install the data-plane forwarding rule in DOCKER-USER; "
+            f"alice<->bob would be dropped by Docker's FORWARD policy. Got:\n{rules}")
     # station -> endpoints (their NIC MACs are known on their own segments)
     switch.execute(
         f"sudo ip neigh replace 10.10.1.1 lladdr {alice_mac} nud permanent dev br-qne; "
@@ -1205,6 +1248,32 @@ def setup_repeater_bridge(slice_obj, station_ip="10.10.1.3"):
         print(f"    {who} -> {target}: {'ok' if good else 'FAILED'}")
         if not good:
             bad.append(f"{who}->{target}")
+    # ICMP alone is not enough: a FORWARD policy that blocks TCP while ICMP still
+    # flows looks healthy here and then hangs the chain in connect(). Prove the
+    # alice->bob TCP path, which is the one the run actually needs.
+    # NOTE: single-quoted python, double quotes inside — no shell escaping, which
+    # is what made the first version of this probe report a false FAILURE.
+    listener = (
+        "nohup timeout 25 python3 -c "
+        """'import socket;s=socket.socket();s.setsockopt(1,2,1);"""
+        """s.bind(("0.0.0.0",5599));s.listen(1);s.accept()' >/dev/null 2>&1 &"""
+    )
+    bob_thread = bob.execute_thread(listener)
+    time.sleep(5)
+    connect = (
+        "timeout 12 python3 -c "
+        """'import socket;socket.create_connection(("10.10.1.2",5599),timeout=10);"""
+        """print("TCP_OK")' 2>&1 | tail -1"""
+    )
+    probe, _ = alice.execute(connect, quiet=True)
+    tcp_ok = "TCP_OK" in probe
+    try:
+        bob_thread.result()
+    except Exception:
+        pass
+    print(f"    alice -> 10.10.1.2 (TCP): {'ok' if tcp_ok else 'FAILED'}")
+    if not tcp_ok:
+        bad.append("alice->10.10.1.2/tcp")
     if bad:
         raise RuntimeError(
             f"repeater station connectivity failed for: {', '.join(bad)}. "
@@ -1226,8 +1295,15 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
                       dead_time=0.0, timing_jitter=0.0, pulse_period_ns=0.0,
                       decoy=False, mu_signal=0.6, mu_decoy=0.1, mu_vacuum=0.001,
                       decoy_probs="0.7,0.2,0.1", channel_delay="auto",
-                      classical_transport="tcp", epoch_ns=0):
+                      classical_transport="tcp", epoch_ns=0, time_authority=False):
     """Run distributed-SeQUeNCe BB84 across the slice (raw 0x7101 photons via P4).
+
+    ``time_authority=True`` starts the central time authority
+    (``qne_sequence.time_authority``) on Bob's node -- "the timeline fixed on one
+    node" -- and drives both runners from it: simulation time is then logical and
+    advanced by LBTS grants, so no frame can arrive late whatever the real latency
+    (``lookahead.certified`` is true by construction). Default False keeps the
+    wall-clock-paced timeline.
 
     Runs real SeQUeNCe QKDNode/BB84 instances (via `qne_sequence.node_runner`) on
     alice and bob: Bob listens (TCP classical + raw photon RX), Alice connects and
@@ -1335,6 +1411,19 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
     runner = (f"cd ~/qfabric/qne-sequence && sudo env PYTHONPATH=$HOME/qfabric "
               f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner")
 
+    authority_thread = None
+    if time_authority:
+        ta_port = port + 100
+        print(f"  Starting the time authority on bob ({bob_data_ip}:{ta_port})...")
+        bob.execute("sudo pkill -f qne_sequence.time_authority 2>/dev/null; true", quiet=True)
+        authority_thread = bob.execute_thread(
+            f"cd ~/qfabric/qne-sequence && env PYTHONPATH=$HOME/qfabric "
+            f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.time_authority "
+            f"--host 0.0.0.0 --port {ta_port} --nodes 2 --timeout 900 "
+            f"2>&1 | tee /tmp/seq_authority.log")
+        common += f" --time-authority {bob_data_ip}:{ta_port}"
+        time.sleep(3)
+
     print("  Starting Bob...")
     bob_thread = bob.execute_thread(
         f"{runner} --role bob --name bob --peer alice --host 0.0.0.0 "
@@ -1365,6 +1454,12 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
         return None
 
     a_res, b_res = _parse(a_out), _parse(b_out)
+    if authority_thread is not None:
+        # both runners have said bye; the authority exits on its own (or at --timeout)
+        try:
+            authority_thread.result()
+        except Exception as exc:   # noqa: BLE001 - diagnostics only
+            print(f"  (time authority thread ended with: {exc})")
 
     results_dir = PROJECT_DIR / "results"
     results_dir.mkdir(exist_ok=True)
@@ -1468,7 +1563,8 @@ def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
                      sample_fraction=0.2, reconcile=True, port=5100,
                      bob_data_ip="10.10.1.2", venv=".venv-qne",
                      auth_key=None, finite_key=False,
-                     classical_transport="tcp"):
+                     classical_transport="tcp", channel_delay="auto",
+                     time_authority=False):
     """Run distributed E91/BBM92 entanglement-based QKD across the slice.
 
     Unlike BB84, entanglement has **no photon plane**: Alice hosts the shared
@@ -1482,6 +1578,11 @@ def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
     direct data-plane TCP) or 'l2' (raw 0x7102 Ethernet frames bridged by the BMv2
     **P4 switch**, which joins Alice's and Bob's separate L2 segments — the switch
     applies no photon loss here since E91 sends no 0x7101 photons).
+
+    ``channel_delay`` is the modeled one-way classical delay ('auto' = 4.9 us/km of
+    ``distance_km``); before 2026-09-21 this was never passed, so E91 slice runs had
+    delay 0 and a vacuous lookahead certificate. ``time_authority=True`` puts the run
+    on the global timeline (shared logical clock; no coordinator process needed here).
 
     ``mode`` is 'e91' (adds the CHSH Bell test) or 'bbm92' (Z/X, key-efficient).
     Prereqs: slice up with data-plane IPs (notebook 01) and setup_sequence_runtime()
@@ -1528,7 +1629,14 @@ def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
     common = (f"--protocol {mode} --num-pairs {num_pairs} --fidelity {fidelity} "
               f"--distance-km {distance_km} --attenuation {attenuation} "
               f"--sample-fraction {sample_fraction} "
+              f"--channel-delay {channel_delay} "
               f"{'--reconcile' if reconcile else '--no-reconcile'} --port {port}")
+    if time_authority:
+        # global timeline: E91 never free-runs (every action waits on a receive),
+        # so the shared logical clock alone is the mechanism -- no coordinator
+        # process, and the endpoint below is a placeholder the runner ignores.
+        common += " --time-authority logical:0"
+
     if auth_key:
         common += f" --auth-key {auth_key}"
     if finite_key:
@@ -1603,7 +1711,7 @@ def run_sequence_repeater(slice_obj, *, num_pairs=20000, fidelity=0.95,
                           bob_data_ip="10.10.1.2", venv=".venv-qne",
                           auth_key=None, finite_key=False,
                           apply_correction=True, num_stations=1,
-                          channel_delay="auto"):
+                          channel_delay="auto", time_authority=False):
     """Run the entanglement-swapping repeater chain across the slice.
 
     The repeater STATION(s) run on the switch node, physically between the
@@ -1655,6 +1763,11 @@ def run_sequence_repeater(slice_obj, *, num_pairs=20000, fidelity=0.95,
               f"--num-stations {num_stations} "
               f"--channel-delay {channel_delay} "
               f"--port {port} --port-ar {port_ar} --port-rb {port_rb}")
+    if time_authority:
+        # global timeline: the chain never free-runs, so one shared logical clock
+        # per node (a station serves two links off it) is the whole mechanism
+        common += " --time-authority logical:0"
+
     if auth_key:
         common += f" --auth-key {auth_key}"
     if finite_key:

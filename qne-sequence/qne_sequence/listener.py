@@ -59,6 +59,18 @@ class Link:
         self.short_frames = 0
 
     def serve(self, host: str, port: int, timeout: float = 30.0) -> None:
+        """listen() then accept_conn() -- the common single-link case."""
+        self.listen(host, port, timeout)
+        self.accept_conn()
+
+    def listen(self, host: str, port: int, timeout: float = 30.0) -> None:
+        """Bind + listen only, WITHOUT blocking on accept.
+
+        A node with several inbound links (the repeater's Bob: one from Alice and
+        one per station) must open every port BEFORE it blocks on the first
+        accept -- otherwise a peer that connects to a not-yet-opened port gets
+        ECONNREFUSED, exhausts its retries and dies, and the run deadlocks.
+        """
         # Match ClassicalServer's family detection: an IPv6 literal (or empty
         # host = bind-all) opens a dual-stack AF_INET6 socket, otherwise IPv4.
         # On the 10.10.1.x data plane this is IPv4 as before; the change only
@@ -78,7 +90,12 @@ class Link:
         ls.listen(1)
         ls.settimeout(timeout)
         self._listen_sock = ls
-        conn, _addr = ls.accept()
+
+    def accept_conn(self) -> None:
+        """Block until the peer connects on a socket already opened by listen()."""
+        if self._listen_sock is None:
+            raise RuntimeError("listen() must be called before accept_conn()")
+        conn, _addr = self._listen_sock.accept()
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._sock = conn
 
@@ -113,12 +130,17 @@ class Link:
             buf += chunk
         return buf
 
-    def recv_one(self) -> bytes | None:
+    def recv_one(self, count: bool = True) -> bytes | None:
         """Read exactly one frame synchronously (header + payload + auth open).
 
         Returns None on EOF / closed socket; raises AuthError on a bad tag.
         Safe only before ``start_rx`` (the timesync handshake) or from within
         the RX thread itself — two concurrent readers would interleave frames.
+
+        ``count=False`` defers the ``rx_count`` increment to the caller: the RX
+        loop counts a frame only AFTER ``on_frame`` has queued it, so anyone who
+        reads the counter and then the event queue (the time authority's
+        transient-message check) can never see a counted-but-unqueued frame.
         """
         header = self._recv_exact(_LEN.size)
         if header is None:
@@ -129,13 +151,14 @@ class Link:
             return None
         if self._auth is not None:
             payload = self._auth.open(payload)
-        self.rx_count += 1
+        if count:
+            self.rx_count += 1
         return payload
 
     def _rx_loop(self) -> None:
         while self._running:
             try:
-                payload = self.recv_one()
+                payload = self.recv_one(count=False)
             except AuthError as exc:
                 self.auth_failures += 1
                 print(f"Link: authentication failure, closing: {exc}",
@@ -146,6 +169,7 @@ class Link:
                 break
             if self.on_frame is not None:
                 self.on_frame(payload)
+            self.rx_count += 1          # counted only once it is queued (see recv_one)
 
     def send(self, payload: bytes) -> None:
         with self._send_lock:
@@ -162,6 +186,28 @@ class Link:
                     s.close()
             except OSError:
                 pass
+
+
+def lookahead_report(on_time_events: int, late_events: int, max_lateness_ps: int,
+                     delay_ps: int) -> dict:
+    """The per-run emulation-fidelity certificate.
+
+    ``certified`` is True only when a lookahead was actually in force
+    (``delay_ps > 0``), at least one frame was checked against its deadline, and
+    none missed it. With ``delay_ps == 0`` nothing is checked (every frame fires on
+    arrival), so ``late_events == 0`` would be vacuous -- ``applicable`` is False and
+    ``certified`` is None rather than a misleading pass.
+    """
+    applicable = delay_ps > 0
+    checked = on_time_events + late_events
+    return {
+        "on_time_events": on_time_events,
+        "late_events": late_events,
+        "max_lateness_ps": max_lateness_ps,
+        "modeled_delay_ps": delay_ps,
+        "applicable": applicable,
+        "certified": (late_events == 0 and checked > 0) if applicable else None,
+    }
 
 
 class Listener:

@@ -9,6 +9,7 @@ import numpy as np
 
 from qne.bb84 import BB84Protocol
 from qne.finite_key import finite_key_length
+from qne.reconcile import verification_bits
 from qne_sequence.reconcile_link import drive_cascade, serve_parities
 
 
@@ -75,5 +76,6 @@ def test_finite_none_preserves_asymptotic_behaviour():
     t.join(timeout=30)
 
     h = BB84Protocol.binary_entropy(q)
-    assert len(b_final) == max(0, int(n * (1.0 - h)) - leaked)
+    # asymptotic accounting minus the public key-verification tag
+    assert len(b_final) == max(0, int(n * (1.0 - h)) - leaked - verification_bits())
     assert out["a"][0] == b_final

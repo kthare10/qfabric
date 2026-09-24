@@ -1,261 +1,114 @@
-# QFabric Technical Specification
+# QFabric Technical Specification — wire formats, tables, protocol messages
 
-This document specifies the data formats, models, and protocol flow that QFabric implements. It reflects the current implementation in `qne/`, `p4/`, and `validation/`.
+- **Status**: 2026-09-21 — reflects `qne/`, `qne-sequence/`, `p4/`, `validation/` as implemented
+- **Audience**: contributors, reviewers, anyone reproducing or extending the platform
+- **Companion docs**: [`README.md`](README.md) (usage), [`ASSUMPTIONS.md`](ASSUMPTIONS.md) (what is modeled), [`CONCEPTS.md`](CONCEPTS.md) (physics → code), [`ROADMAP.md`](ROADMAP.md) (status)
 
-- **Status**: v0.1.0 — BB84 QKD over a single emulated link
-- **Audience**: contributors, reviewers, and anyone reproducing or extending the platform
-- **Companion docs**: [`README.md`](README.md) (usage), [`ROADMAP.md`](ROADMAP.md) (plan)
-
----
-
-## 1. System Overview
-
-QFabric emulates a quantum link with three roles:
-
-```
-  Alice (qne/alice.py)        P4 switch (p4/bmv2)        Bob (qne/bob.py)
-  ─────────────────────       ─────────────────────      ─────────────────────
-  generate random             probabilistic photon       apply detector model
-  (basis, state) photons      drop = fiber loss          (efficiency, dark counts,
-  send raw 0x7101 frames  ──► forward survivors      ──► random-basis measurement)
-                              L2-forward classical
-  ◄───────────────  classical channel: TCP/JSON sifting  ───────────────►
-```
-
-The **quantum channel** is the photon path through the P4 switch (lossy, one-way).
-The **classical channel** is a standard TCP connection used for BB84 post-processing. On FABRIC this rides a real WAN link, which is the central research lever: it injects real latency/jitter/congestion into the classical-quantum feedback loop.
-
-A pure-Python **simulation mode** (`validation/run_qfabric.py`) reproduces the same loss/detector/BB84 logic without BMv2 or raw sockets, for cross-validation and CI.
+This document is deliberately limited to the things a second implementation would need to
+interoperate: frame layouts, P4 tables, the classical message sequence, and the key-rate
+formulas. Narrative and modeling assumptions live in the companion docs.
 
 ---
 
-## 2. Photon Wire Format
+## 1. Roles and channels
 
-Photons travel as custom Ethernet frames. Defined in `qne/photon.py` and mirrored in `p4/bmv2/includes/headers.p4`.
+```
+ Alice ──0x7101 photon frames──►  BMv2 P4 switch  ──►  Bob
+        ◄──0x7102 classical────►  ("the fiber")   ◄──►
+   control plane (state-service RPC, timeline handshake): TCP — emulator bookkeeping, not an emulated channel
+```
 
-### 2.1 Ethernet header (14 bytes)
+| Channel | Frames | Switch behaviour | Transport options |
+|---|---|---|---|
+| Quantum | `0x7101` photon descriptors | per-wavelength probabilistic drop (fiber loss), MAC rewrite, counters; **table miss = drop** | raw L2 (slice); TCP descriptor batches (dev, `qne-sequence --quantum-transport tcp`) |
+| Classical | `0x7102` reliable datagrams | forward + count, **never loss** (`classical_channel_params`) | raw L2 (`--classical-transport l2`); TCP (`qne/` path, dev) |
 
-| Field | Bytes | Value |
-|-------|-------|-------|
-| Destination MAC | 6 | configurable (default `02:00:00:00:00:02`) |
-| Source MAC | 6 | configurable (default `02:00:00:00:00:01`) |
-| EtherType | 2 | `0x7101` (photon) |
+## 2. Photon frame (EtherType `0x7101`) — `qne/photon.py`, `p4/bmv2/includes/headers.p4`
 
-### 2.2 Photon header (17 bytes)
+Ethernet header (14 B: dst MAC, src MAC, `0x7101`) followed by the photon header, `struct` format `!4B3IB` (17 B):
 
-Packed as `struct` format `!4B3IB`:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `version` | u8 | Protocol version (`0x01`) |
+| Field | Type | Meaning |
+|---|---|---|
+| `version` | u8 | `0x01` |
 | `basis` | u8 | `0` = Z (rectilinear), `1` = X (diagonal) |
-| `state` | u8 | `0` = \|0⟩/\|+⟩, `1` = \|1⟩/\|−⟩ — the classical bit value |
-| `wavelength` | u8 | Channel tag (keys the loss table; enables future WDM) |
-| `sequence_num` | u32 | Monotonic photon identifier |
-| `timestamp_hi` | u32 | TX timestamp, upper 32 bits (picoseconds) |
-| `timestamp_lo` | u32 | TX timestamp, lower 32 bits (picoseconds) |
-| `padding` | u8 | Reserved |
+| `state` | u8 | `0` = \|0⟩/\|+⟩, `1` = \|1⟩/\|−⟩ — the classical bit |
+| `wavelength` | u8 | keys the loss table (WDM hook; single wavelength today) |
+| `sequence_num` | u32 | monotonic photon id; the sifting key on both sides |
+| `timestamp_hi/lo` | 2×u32 | TX time, ps (informational — Bob never compares clocks) |
+| `padding` | u8 | reserved |
 
-Frames are zero-padded to the 60-byte Ethernet minimum. `EtherType 0x0800` (IPv4) is reserved in the P4 headers for classical traffic.
+Frames are padded to the 60-byte Ethernet minimum. **There is no photon-count field**: decoy-state runs (Poisson photon numbers) therefore use the TCP descriptor transport with thinning at the source and do not traverse the P4 loss table (open item).
 
----
+## 3. Classical frame (EtherType `0x7102`) — `qne-sequence/qne_sequence/l2_link.py`
 
-## 3. Quantum Channel Model (P4)
+`ReliableLink` header `!2sBBQHHI` (20 B) after the Ethernet header:
 
-Implemented in `p4/bmv2/quantum_channel.p4` for the BMv2 V1Model.
+| Field | Type | Meaning |
+|---|---|---|
+| `magic` | 2 s | `b"QL"` |
+| `version` | u8 | `2` (v2 added `payload_len`; any other version is dropped) |
+| `type` | u8 | 1 DATA, 2 ACK, 3 HELLO, 4 HELLO_ACK |
+| `seq` | u64 | message sequence |
+| `frag_index`, `frag_count` | u16, u16 | fragmentation (default fragment 1400 B) |
+| `payload_len` | u32 | bytes of payload actually carried — strips Ethernet min-frame padding; a frame declaring more than it carries is **dropped, not ACKed** (`short_frames` counter) |
 
-### 3.1 Fiber loss
+Semantics: every DATA fragment is ACKed independently and retransmitted on timeout (20 ms, 50 retries); complete messages are delivered strictly in order, duplicates ACKed but never delivered twice. `qne/auth.py` (HMAC-SHA256 tag + strictly sequential anti-replay counter under a pre-shared key) seals the *payload bytes* and is transport-agnostic. The `qne/` TCP path uses `[u32 length][UTF-8 JSON]` framing with `MAX_FRAME_BYTES = 64 MiB`.
 
-Fiber attenuation is modeled as probabilistic packet drop:
+## 4. P4 program — `p4/bmv2/quantum_channel.p4`
 
-```
-P(loss) = 1 − 10^(−α·L/10)
-```
+| Table | Key | Action | Notes |
+|---|---|---|---|
+| `quantum_channel_params` | `wavelength` | `set_channel_params(threshold, port, src_mac, dst_mac)`; default `drop_photon` | per photon: `random(0, 2³²−1) < threshold` → drop (+`photon_drop_counter`); else rewrite MACs, forward (+`photon_tx_counter`) |
+| `classical_channel_params` | `ingress_port` | `classical_forward(port, src_mac, dst_mac)` (+`classical_fwd_counter`) | `0x7102`; **no loss path** |
+| `port_forwarding` | `ingress_port` | `port_forward(...)` | all other EtherTypes (control plane, ARP, IP) |
 
-where `α` = attenuation (dB/km) and `L` = distance (km). The probability is pre-computed off-switch into a 32-bit threshold:
+`threshold = floor(P(loss)·2³²)` clamped to `2³²−1`, with `P(loss) = 1 − 10^(−α·L/10)` (`qne.config.ScenarioConfig.loss_threshold_u32`). Distance sweeps change the entry **in place** (`deploy_fabric.set_channel_loss` → `table_modify`); restarting the switch per point is the historical "loss freeze" bug. Known gaps: the loss table is direction-blind (single entry, egress port hard-coded) and the counters are not read back by any tool.
 
-```
-threshold = floor(P(loss) · 2³²)
-```
+## 5. Classical message sequence
 
-installed in the `quantum_channel_params` table keyed by `wavelength`. Per photon:
+### 5.1 `qne/` raw-socket BB84 (`qne/alice.py`, `qne/bob.py`, `qne/reconcile.py`)
 
-1. Draw `random_value ∈ [0, 2³²)` via the P4 `random` extern.
-2. Increment `photon_tx_counter[wavelength]`.
-3. If `random_value < threshold` → drop the photon (lost in fiber), increment `photon_drop_counter[wavelength]`.
-4. Otherwise forward to the egress port and rewrite src/dst MAC.
+| # | Dir | `type` | Payload |
+|---|---|---|---|
+| 1 | A→B | `alice_bases` | `{seq: basis}` for every sent photon |
+| 2 | B→A | `sifting_result` | `matching_indices` (sorted, basis-matched detections), `detected_sequences` |
+| 3 | B→A | `request_sample` | positions to disclose: a `sample_fraction` random subset of matches; with `basis_bias ≠ 0.5`, **all X–X matches plus a Z–Z sample** |
+| 4 | A→B | `alice_sample_bits` | Alice's bits at those positions |
+| 5 | B→A | `qber_result` | `qber`, `confidence_interval` (Wilson 95 %), `num_sampled`, `num_errors`, `raw_key_rate`, `secure_key_rate`, `final_key_bits`, `reconcile` (bool) |
+| 6…| B⇄A | `PARITY_REQ` / `PARITY_RESP` | Cascade: Bob sends index blocks, Alice returns parities (each parity counted once in `bits_leaked`) |
+| n | B→A | `RECONCILE_DONE` | `corrections`, `bits_leaked`, `out_len`, `pa_seed`, `verify_seed`, `verify_tag`, `eps_cor` |
+| n+1 | A→B | `RECONCILE_VERIFY` | `ok` — Alice's tag over her key equals Bob's. On `false` both sides raise `KeyVerificationError` and output **no key** |
 
-The table action `set_channel_params(threshold, port, src_mac, dst_mac)` carries the egress port and MAC rewrite. Default action drops, so unconfigured wavelengths are fully attenuated.
+Key material = matched positions minus everything disclosed in step 3. After `RECONCILE_VERIFY ok`, both sides apply the same Toeplitz hash (`qne/privacy.py`, seed `pa_seed`, length `out_len`) and hold the identical secret. Any unexpected `type` raises `ProtocolError`.
 
-### 3.2 Classical traffic forwarding
+### 5.2 `qne-sequence` (`WireCodec` JSON envelopes over `Link`/`ReliableLink`)
 
-Non-photon packets are forwarded by the `port_forwarding` table keyed on `ingress_port` (a bidirectional pipe), rewriting the source MAC to the switch port's own MAC. This is a deliberate workaround for FABRIC's OVS dropping frames with unknown destination MACs (MAC-learning issue). Default action drops.
+BB84: `QUBITS` (descriptor batches, `bulk` or `per_event`), `QUBITS_DONE`, `BASES`, `SIFTED` (matching indices, sample indices + Bob's sample bits, decoy indices/bits when `--decoy`), `QBER`/`SUMMARY`; then the same `PARITY_REQ`/`PARITY_RESP`/`RECONCILE_DONE`/`RECONCILE_VERIFY` exchange over `RpcChannel`. Every frame carries `t_send` so the receiver can fire it at `t_send + delay` (lookahead) and account late arrivals. E91/repeater add `PLAN`, `MEASURE_REQ/RESP` (the state-service RPC, *not* part of the public classical transcript), heralds (`X^m2 Z^m1` corrections from each station) and the CHSH quartet.
 
-### 3.3 Pipeline
+## 5.3 Time authority (control plane, newline-delimited JSON over TCP)
 
-`PhotonParser → PhotonVerifyChecksum → PhotonIngress → PhotonEgress (pass-through) → PhotonComputeChecksum → PhotonDeparser`. All channel logic lives in ingress; egress is a no-op.
+| Dir | Message | Meaning |
+|---|---|---|
+| node→authority | `{"kind":"hello","node":N,"lookahead_ps":L}` | register; `L` = modeled one-way delay of the node's links |
+| node→authority | `{"kind":"report","node":N,"round":r,"next_ps":T\|null,"sent":S,"recv":R}` | earliest unexecuted event (null = idle) + cumulative classical messages sent/received |
+| authority→node | `{"kind":"grant","round":r+1,"lbts":X\|null}` | events with time ≤ X may run; `null` = every node idle and nothing in flight → run over |
+| authority→node | `{"kind":"rereport"}` | Σsent ≠ Σrecv: transients in flight, report again |
+| node→authority | `{"kind":"bye","node":N}` | node finished; its last counts stay in the totals |
 
----
+`LBTS = min_i(next_ps_i + lookahead_i)` over live nodes. Nodes snapshot counters *before* their queue, and links count a message only after queuing it, so "idle with balanced counts" cannot hide a pending message.
 
-## 4. Quantum Node Models (Python)
+## 6. Key-rate accounting (`qne/bb84.py`, `qne/finite_key.py`, `qne/decoy.py`)
 
-### 4.1 Alice — photon source (`qne/alice.py`)
+| Mode | Formula | Where |
+|---|---|---|
+| Asymptotic (default) | `r = 1 − 2h(Q)` for `Q < 0.11`, else 0; PA length `n·(1−h(Q)) − leak_EC − t` | `secure_key_fraction`, `reconcile.secure_key_bits` |
+| Efficient BB84 (`basis_bias ≠ 0.5`) | `1 − h(e_z) − h(e_x)`; key from Z–Z only, all X–X disclosed | `efficient_secure_fraction` |
+| Finite key (`--finite-key`) | `ℓ = n(1 − h(Q + μ)) − leak_EC − log2(2/(ε_sec²·ε_cor))`, `μ = sqrt((n+k)/(nk)·(k+1)/k·ln(4/ε_sec))` (TLGR Eq. 2) | `finite_key_length` |
+| Decoy (GLLP) | `R = ½[ Q₁(1 − h(e₁)) − f_EC·Q_μ·h(E_μ) ]` with Ma–Qi–Zhao–Lo Eq. 34/37 bounds `Y₁ᴸ`, `e₁ᵁ`; near-vacuum Y₀ straddled conservatively | `decoy_state_key_rate` |
+| Entanglement (Werner weight w) | `QBER = (1−w)/2`, `S = 2√2·w`, chain of L links: `wᴸ`; Bell fidelity `(3w+1)/4` | `qstate_core`, `repeater.py` |
 
-For each of `num_photons` slots, draws `basis` and `state` uniformly at random, builds a `PhotonPacket`, and transmits it over an `AF_PACKET` raw socket bound to the egress interface. Optional rate limiting via `send_rate_hz`. Records each `(sequence_num, basis, bit_value)` in `sent_log`, then connects to Bob for sifting.
+`t = ceil(log2(2/ε_cor))` is the key-verification tag length (51 bits at `ε_cor = 1e-15`). `h` is binary entropy. `Q` is the sampled point estimate in asymptotic mode by definition; the finite-key mode is the defensible number for real block sizes.
 
-### 4.2 Detector model (`qne/detector.py`)
+## 7. Scenario configuration
 
-Per incoming photon:
-
-1. Bob chooses a measurement basis uniformly at random.
-2. **Basis match** → measured bit = photon's `state`, **unless** polarization imperfection depolarizes it: with probability `polarization_error` the outcome is randomized. This is the intrinsic QBER source.
-   **Basis mismatch** → measured bit is random (50/50).
-3. Apply **detection efficiency**: detected with probability `efficiency`.
-4. **Dark count**: if not detected, fire with probability `dark_count_rate · detection_window`, yielding a random bit. Dark counts are flagged.
-
-`polarization_error` is derived from the channel's `polarization_fidelity` F as `1 − F`; on a matched basis it contributes an intrinsic QBER ≈ `(1 − F)/2` (depolarizing model). Both the sim path (`run_qfabric`) and the live `Bob` set it this way.
-
-Config knobs: `efficiency`, `dark_count_rate` (Hz), `detection_window` (s; default 1 ns), `polarization_error`. `dead_time` and `timing_jitter` exist in config but are not yet modeled (see ROADMAP).
-
-### 4.3 Bob — receiver (`qne/bob.py`)
-
-Listens on a raw socket (30 s idle timeout), parses photon frames, applies the detector, and logs detections only (losses produce no record). Then runs the classical sifting exchange as TCP server.
-
----
-
-## 5. BB84 Protocol Flow
-
-Classical post-processing logic lives in `qne/bb84.py`; the live message exchange is split across `qne/alice.py` and `qne/bob.py` over `qne/channel.py`.
-
-### 5.1 Classical channel transport (`qne/channel.py`)
-
-Length-prefixed JSON over TCP: `[4-byte big-endian length][UTF-8 JSON]`. `ClassicalServer` (Bob) listens with IPv4/IPv6 dual-stack; `ClassicalClient` (Alice) connects with retries (default 60 attempts × 2 s) to tolerate Bob still draining photons. Once connected, the socket uses a generous `data_timeout` (default 600 s) so large basis lists (e.g. 100k photons) transfer over the emulated path without a spurious timeout.
-
-On FABRIC the classical channel rides the **data-plane L2 link** (Bob at `10.10.1.2:5100`), not the management network — the management network blocks arbitrary cross-site TCP. Because it shares the link with photon frames but is plain IP/TCP (photons are EtherType `0x7101`), it can be impaired in isolation with `tc`/`netem` (see §10).
-
-### 5.2 Message sequence
-
-| # | Direction | `type` | Payload |
-|---|-----------|--------|---------|
-| 1 | Alice → Bob | `alice_bases` | `{seq: basis}` for all sent photons |
-| 2 | Bob → Alice | `sifting_result` | `matching_indices`, `detected_sequences` |
-| 3 | Bob → Alice | `request_sample` | `matching_indices` to compare |
-| 4 | Alice → Bob | `alice_sample_bits` | Alice's bit values at those indices |
-| 5 | Bob → Alice | `qber_result` | `qber`, `confidence_interval`, `num_sampled`, `num_errors`, `raw_key_rate`, `secure_key_rate`, `final_key_bits` |
-
-### 5.3 Sifting
-
-Keep only positions where (a) Bob detected the photon and (b) Alice's and Bob's bases match. `BB84Protocol.sift` indexes Bob's detections by `sequence_num` and intersects with Alice's log.
-
-### 5.4 QBER estimation
-
-Sample a `sample_fraction` (default 0.1) of sifted positions, count mismatches, and report `qber = errors / num_sampled`. A 95% **Wilson score** confidence interval is computed. Sampled bits are considered consumed (removed from key material).
-
-### 5.5 Secure key rate
-
-Asymptotic Shor–Preskill bound per sifted bit:
-
-```
-r = max(0, 1 − 2·H₂(QBER))      for QBER < 0.11
-r = 0                            for QBER ≥ 0.11   (BB84 security threshold)
-```
-
-where `H₂` is binary entropy. The fraction `r` is computed by the single shared helper **`BB84Protocol.secure_key_fraction(qber)`**, used by the simulation path, the live `Bob` path, and the SeQUeNCe/NetSquid adapters (one source of truth). Then:
-
-- `raw_key_rate    = sifted_bits / num_photons_sent`
-- `final_key_bits  = floor((sifted_bits − num_sampled) · r)`
-- `secure_key_rate = final_key_bits / num_photons_sent`
-
----
-
-## 6. Configuration & Scenarios
-
-### 6.1 `ScenarioConfig` (`qne/config.py`)
-
-Nested YAML consumed by the live Alice/Bob path:
-
-```yaml
-name: baseline_1km
-channel:
-  distance_km: 1.0
-  attenuation_db_per_km: 0.2
-  polarization_fidelity: 1.0      # parsed; not yet modeled
-detector:
-  efficiency: 0.8
-  dark_count_rate: 10.0           # Hz
-  dead_time: 0.0                  # parsed; not yet modeled
-  timing_jitter: 0.0              # parsed; not yet modeled
-protocol:
-  num_photons: 100000
-  send_rate_hz: 1000000.0
-  sample_fraction: 0.1
-  wavelength: 0
-seed: 42
-```
-
-Derived properties: `loss_probability` and `loss_threshold_u32` (the value installed in the switch's `quantum_channel_params` table by `deploy_fabric.py` / notebook `01_setup_slice`).
-
-### 6.2 `ValidationScenario` (`validation/scenario.py`)
-
-A platform-neutral, flat scenario used by the cross-validation framework. `from_yaml` accepts **both** the nested `ScenarioConfig` layout and a flat layout, so one YAML file can drive every backend. `load_sweep` expands a `sweep:` block:
-
-```yaml
-sweep:
-  parameter: distance_km
-  values: [1, 5, 10, 20, 50, 100]
-base:
-  attenuation_db_per_km: 0.2
-  detector_efficiency: 0.8
-  num_photons: 100000
-  sample_fraction: 0.1
-  seed: 42
-```
-
-Provided scenarios: `baseline_1km`, `fabric_1km`, `quick_test`, `sweep_distance`, `sweep_attenuation`.
-
----
-
-## 7. Cross-Validation Framework
-
-The cross-validation compares BB84 QBER and secure key rate across **four backends for the same scenario, all executed on the FABRIC slice** (notebook `03_cross_validation` → `deploy_fabric.run_cross_validation_on_fabric`):
-
-| Backend | Runs on | Source of QBER |
-|---------|---------|----------------|
-| `qfabric` | BMv2 data plane (the `02_run_experiment` run) | measured emulation, loaded from `results/fabric_bob_results.json` |
-| `qfabric_sim` | switch node (`.venv-qsim`) | `run_qfabric.py` — same `Detector`+`BB84Protocol` code as the live path, no traffic |
-| `sequence` | alice node (`.venv-seq`, Python 3.12) | `run_sequence.py` — SeQUeNCe 1.0 native QKD stack (`pair_bb84_protocols`, real QuantumChannels with `polarization_fidelity`) |
-| `netsquid` | bob node (`.venv-nsq`) | `run_netsquid.py` — NetSquid real qubits + `DepolarNoiseModel` |
-
-- **Execution model**: each adapter runs standalone as `python -m validation.run_<backend> scenario.yml --json -`, emitting a sentinel-wrapped `ValidationResult`. `compare.run_backend_on_node` invokes it on the node via `fablib` and parses the result back; `compare.run_backend_subprocess` does the same locally via a per-backend interpreter (`QFABRIC_SEQUENCE_PYTHON` / `QFABRIC_NETSQUID_PYTHON`). SeQUeNCe 1.0 (Python ≥3.12) and NetSquid (3.10/3.11) can't share an interpreter, hence different nodes/venvs.
-- **Honest reporting**: `backend_status()` classifies each result as `ok` / `unavailable` / `no_data`; only `ok` backends are compared. Missing libraries or API drift surface as **SKIPPED** with the error — never a fake pass. With fewer than two `ok` backends the run reports **INCONCLUSIVE**.
-- **QBER for comparison** is taken over the **full sifted key** (not the 10% protocol sample) for `qfabric_sim`/`sequence`/`netsquid`, so the comparison reflects the physics model rather than estimator noise. The measured `qfabric` point keeps its protocol-sample QBER; each result records `qber_sample_bits` (the N its QBER was estimated from).
-- **Agreement test**: two backends agree when `|QBER_a − QBER_b| < num_sigma · √(p̄(1−p̄)(1/N_a + 1/N_b))` — the standard error of the *difference* of two independent estimates, using each backend's `qber_sample_bits` (default `num_sigma = 2`). This correctly widens the bound for the sample-based FABRIC point. A simulator-vs-simulator DIFFER reflects a genuine model difference, not an error.
-- **Output**: per-pair AGREE/DIFFER with ΔQBER and tolerance; notebook 03 saves all results to `results/cross_validation.json`, which `04_analysis` loads to plot QBER and key rate across all backends. Parameter sweeps additionally produce QBER/key-rate-vs-parameter plots via matplotlib (`--plot out.png`).
-- **Test-suite baseline**: `validation/reference_bb84.py` is an independent *analytic* BB84 model used only by the tests to sanity-check the QFabric emulator — it is **not** a simulator backend.
-
----
-
-## 8. Metrics
-
-`qne/metrics.py` collects `ExperimentMetrics`: photons sent/received/lost, dark counts, sifted bits, QBER (+ CI), raw/secure key rate, final key bits, elapsed time, and the full scenario config. Derived `loss_rate` and `detection_rate`. Serializable to/from JSON; FABRIC runs write `results/fabric_alice_results.json` and `results/fabric_bob_results.json`.
-
----
-
-## 9. Invariants & Assumptions
-
-- Photons are modeled at the **bit/basis level**, not as full quantum states — sufficient for prepare-and-measure BB84, not for entanglement or multi-qubit protocols.
-- QBER comes from a **depolarizing polarization-misalignment** model (`polarization_error = 1 − F`), giving an intrinsic QBER ≈ (1 − F)/2, plus dark-count and finite-sampling noise. Phase error and timing (`dead_time`, `timing_jitter`) are not yet modeled.
-- The loss model is **memoryless and per-packet**; it captures average attenuation, not burst loss or correlated fading.
-- One **wavelength / one link** per run. Multi-hop and WDM are designed-for (header fields exist) but not implemented.
-- The P4 `random` extern and the Python `numpy` RNG are independent; reproducibility holds **within** a backend (fixed `seed`), not bit-for-bit **across** the P4 and Python paths.
-
----
-
-## 10. Classical-Network-Effects Experiment
-
-The headline contribution: measuring how *real* classical-channel conditions affect QKD — what ideal-channel simulators cannot show. Driven by notebook `06_network_effects` over `deploy_fabric` helpers.
-
-- **Isolation.** `apply_classical_netem(slice_obj, delay_ms, jitter_ms, loss_pct, alice_delay_ms, bob_delay_ms)` installs a `prio` qdisc + `netem` band on each endpoint's data-plane interface and a `u32` filter that routes **only TCP:5100** (the sifting channel, matched on src/dst port) into the impaired band. Photon frames (EtherType `0x7101`, non-IP) fall through unaffected, so the quantum channel is untouched. `clear_classical_netem` removes it. Asymmetric per-direction latency is supported.
-- **What changes, what doesn't.** The classical channel is TCP (reliable), so latency/jitter/loss do **not** change QBER or bits-per-photon. They change **time-to-key** (`elapsed_seconds`) and effective **key bits/second** (`final_key_bits / elapsed_seconds`). QBER staying flat across conditions is the sanity check that the impairment isolated the classical path.
-- **Orchestration.** `run_network_conditions_experiment(slice_obj, scenario, conditions)` applies each condition, runs BB84, records `{qber, sifted_bits, final_key_bits, secure_key_rate, elapsed_seconds, key_bits_per_sec}`, and writes `results/network_effects.json` (resumable; netem is cleared on every iteration and at the end). Default conditions: baseline, +25 ms, +100 ms, jitter 50±20 ms, 1% loss, asymmetric 100/10 ms.
-- **Why it matters.** On an ideal classical channel (the SeQUeNCe/NetSquid assumption) key *rate* is independent of the control channel; on QFabric it degrades with real latency/jitter/loss — quantifying the simulation-vs-deployment gap.
+`ScenarioConfig` (`qne/config.py`, nested YAML) — `channel{distance_km, attenuation_db_per_km, polarization_fidelity}`, `detector{efficiency, dark_count_rate (Hz), detection_window (s, default 1e-9), dead_time (ns), timing_jitter (ns)}`, `protocol{num_photons, send_rate_hz, sample_fraction, wavelength, basis_bias}`, `seed` (**`null` by default** — OS entropy; an integer makes the run reproducible and its key derivable). `ValidationScenario` (`validation/scenario.py`) is the flat, platform-neutral form accepted by every simulator adapter and supports `sweep:` files. Result schemas: `qne.metrics.ExperimentMetrics` (raw-socket path) and the `node_runner` JSON line (`qne-sequence/README.md`).

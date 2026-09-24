@@ -56,6 +56,9 @@ def _open_raw_socket(interface: str) -> "socket.socket":
     return sock
 
 
+_PHOTON_PRIORITY_BASE = -(1 << 40)   # sort photon events before classical ones at equal time
+
+
 class RawQuantumChannel:
     """Alice-side photon TX over a raw 0x7101 socket.
 
@@ -151,6 +154,11 @@ class RawPhotonReceiver:
         self._running = False
         self._seq = 0
         self.rx_count = 0
+        self.last_rx_ns = 0     # wall time of the last photon frame (quiescence guard)
+
+    def quiescent(self, window_ns: int) -> bool:
+        """True when no photon frame has arrived for ``window_ns``."""
+        return self.last_rx_ns == 0 or (time_ns() - self.last_rx_ns) >= window_ns
 
     def start(self) -> None:
         self._sock = _open_raw_socket(self.interface)
@@ -173,10 +181,14 @@ class RawPhotonReceiver:
                 continue  # not a photon frame
             self.rx_count += 1
             self._seq += 1
+            self.last_rx_ns = time_ns()
             pulse = [[pkt.sequence_num, pkt.basis, pkt.state]]
             proc = Process(self.protocol, "receive_qubits", [self.peer_name, pulse])
+            # Photons sort BEFORE any classical frame that shares their timestamp
+            # (negative priority band): under the conservative timeline the photon
+            # train and QUBITS_DONE can land on the same logical tick.
             self.timeline.inject(Event(self.timeline.now() + self.delay, proc,
-                                       priority=self._seq))
+                                       priority=_PHOTON_PRIORITY_BASE + self._seq))
 
     def stop(self) -> None:
         self._running = False

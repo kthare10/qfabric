@@ -68,15 +68,22 @@ DEFAULT_INTENSITIES = {"signal": 0.6, "decoy": 0.1, "vacuum": 0.001}
 
 
 def detection_probability(n: int, eta: float, p_dc: float = 1e-6) -> float:
-    """Detection probability of an n-photon pulse: 1 − (1−η)^n + p_dc (n≥1)."""
-    if n == 0:
-        return float(np.clip(p_dc, 0.0, 1.0))
-    return float(np.clip(1.0 - (1.0 - eta) ** n + p_dc, 0.0, 1.0))
+    """Detection probability of an n-photon pulse: 1 − (1−p_dc)(1−η)^n.
+
+    A click happens if any photon is detected OR a dark count fires; the two are
+    independent, so the no-click probability multiplies. (The additive form
+    1−(1−η)^n + p_dc double-counts the overlap and can exceed 1.) n = 0 gives p_dc.
+    """
+    return float(np.clip(1.0 - (1.0 - p_dc) * (1.0 - eta) ** max(n, 0), 0.0, 1.0))
 
 
 def analytic_gain(mu: float, eta: float, p_dc: float = 1e-6) -> float:
-    """Expected gain Q_μ = 1 − e^{−ημ} + p_dc for a Poisson(μ) source (clipped)."""
-    return float(np.clip(1.0 - np.exp(-eta * mu) + p_dc, 0.0, 1.0))
+    """Expected gain Q_μ = 1 − (1−p_dc)·e^{−ημ} for a Poisson(μ) source.
+
+    Poisson-averaging ``detection_probability`` gives exactly this (Ma et al. Eq. 8
+    with Y0 = p_dc).
+    """
+    return float(np.clip(1.0 - (1.0 - p_dc) * np.exp(-eta * mu), 0.0, 1.0))
 
 
 def decoy_state_key_rate(gains: dict, qbers: dict, intensities: dict,

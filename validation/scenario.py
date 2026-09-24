@@ -29,6 +29,8 @@ from typing import Any
 
 import yaml
 
+from qne.config import ChannelConfig, ScenarioConfig
+
 
 @dataclass
 class ValidationScenario:
@@ -50,7 +52,10 @@ class ValidationScenario:
     @property
     def expected_loss_probability(self) -> float:
         """Fiber loss: P(loss) = 1 - 10^(-alpha*L/10)."""
-        return 1.0 - 10 ** (-(self.attenuation_db_per_km * self.distance_km) / 10.0)
+        return ScenarioConfig(channel=ChannelConfig(
+            distance_km=self.distance_km,
+            attenuation_db_per_km=self.attenuation_db_per_km,
+        )).loss_probability
 
     def to_flat_dict(self) -> dict[str, Any]:
         """Flat dict (keys == field names) so it round-trips through from_yaml().

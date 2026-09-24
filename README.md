@@ -1,159 +1,104 @@
 # QFabric: Quantum Network Emulation Platform on FABRIC
 
-QFabric is a programmable quantum network emulation platform built on the [FABRIC testbed](https://fabric-testbed.net). It emulates quantum channels using P4 programmable switches and runs BB84 QKD as its first protocol, with cross-validation against the SeQUeNCe and NetSquid simulators.
+QFabric is a programmable quantum network emulation platform built on the [FABRIC testbed](https://fabric-testbed.net). It runs quantum-network protocols — BB84 QKD (with decoy-state accounting), entanglement-based QKD (E91/BBM92) and entanglement-swapping repeater chains — as **real distributed systems** on testbed nodes, with the *fiber* emulated in a P4/BMv2 data plane and cross-validated against the SeQUeNCe and NetSquid simulators.
 
-The core idea: pure quantum-network simulators (NetSquid, SeQUeNCe) assume an *ideal* classical control channel. QFabric runs the classical sifting traffic over a **real WAN** on FABRIC, so genuine latency, jitter, and congestion enter the protocol naturally — letting us measure how classical-network conditions affect quantum-protocol performance.
+**What is emulated and what is real (read `ASSUMPTIONS.md` before quoting any number):**
 
-New to quantum networking? Start with [`PRIMER.md`](PRIMER.md) — **the concepts from zero, no code, no prior physics** — then [`CONCEPTS.md`](CONCEPTS.md), which maps every concept to the code that implements it. See [`SPEC.md`](SPEC.md) for the design and wire formats, and [`ROADMAP.md`](ROADMAP.md) for what's done and what's next.
+| | Quantum channel | Classical channel | Quantum state |
+|---|---|---|---|
+| Carries | photon descriptors (`0x7101` frames) | sifting, QBER sample, Cascade parities, heralds (`0x7102` frames) | Bell pairs for E91 / swapping |
+| Implemented as | P4 switch drops each frame with the Beer–Lambert fiber-loss probability | raw L2 through the **same** switch, reliable-datagram shim; TCP as a dev fallback | numpy Werner-state register on one node, reached by RPC |
+| Real? | statistical model of loss + depolarizing noise; **no photons, no quantum states on the wire** | real frames on real links | **no physical entanglement**; a correctness/distribution check, not a Bell test |
 
-## Get the code
+The design bet: *the switch is the fiber*, carrying both "wavelengths". Slices are **single-site** by default — a photon cannot cross a WAN — and one distance knob (`--distance-km` / `--channel-delay auto`) drives both fiber loss and classical propagation delay (~5 µs/km). Cross-site slices and netem impairments are **stress studies**, not operating conditions: a real QKD classical channel has no loss and ~zero delay (SeQUeNCe-team feedback, 2026-07; see `ASSUMPTIONS.md`).
 
-```bash
-git clone https://github.com/kthare10/qfabric.git
-cd qfabric
-```
+New to quantum networking? Start with [`PRIMER.md`](PRIMER.md) (concepts from zero, no code), then [`CONCEPTS.md`](CONCEPTS.md) (concept → code map). [`SPEC.md`](SPEC.md) has the wire formats and protocol messages, [`ASSUMPTIONS.md`](ASSUMPTIONS.md) the modeling assumptions, [`ROADMAP.md`](ROADMAP.md) status and open items, and [`REVIEW_2026-09-21.md`](REVIEW_2026-09-21.md) the latest code review with what was fixed and what remains.
 
 Repository: <https://github.com/kthare10/qfabric>
 
 ## Architecture
 
 ```
-Alice (Python)  →  BMv2 P4 Switch  →  Bob (Python)
-  photon source      fiber loss         detector model
-  raw socket         probabilistic      raw socket
-                     packet drop        + BB84 sifting
-                                        via TCP
+ Alice ──0x7101 photon frames──►  BMv2 P4 switch  ──►  Bob
+        ◄──0x7102 classical────►  (loss table,       (detector model:
+            reliable-datagram        classical fwd,    efficiency, dark counts,
+            shim, HMAC optional)     counters)         dead time, jitter, F)
+
+ sift → QBER sample → Cascade → key-verification tag → Toeplitz PA → identical secret
+ accounting: asymptotic 1−2h(Q) | efficient 1−h(e_z)−h(e_x) | finite-key (TLGR) | decoy (GLLP)
 ```
 
-- **P4 switch**: Implements fiber attenuation as probabilistic packet drop using custom EtherType `0x7101` photon frames. Classical traffic is L2-forwarded separately.
-- **Python QNE**: Alice (photon source) and Bob (detector model with efficiency, dark counts, random-basis measurement).
-- **Classical channel**: Standard TCP for BB84 sifting — real WAN effects enter naturally on FABRIC.
+Two implementations share the physics and post-processing code (`qne/bb84.py`, `qne/detector.py`, `qne/reconcile.py`, `qne/finite_key.py`, `qne/decoy.py`, `qne/auth.py`):
+
+- **`qne/`** — the hand-coded raw-socket BB84 path: `qfabric alice` / `qfabric bob` CLIs, photons as `0x7101` frames through the switch, classical post-processing over TCP. This is the measured data point in the simulator cross-validation.
+- **`qne-sequence/`** — the distributed runtime built on SeQUeNCe's timeline: BB84 (incl. decoy source, biased bases, Eve), E91/BBM92 over a shared quantum-state service, n-node repeater chains, raw-L2 classical transport, lookahead delivery with a per-run fidelity certificate. See [`qne-sequence/README.md`](qne-sequence/README.md).
 
 ## Components
 
 | Directory | Description |
 |-----------|-------------|
-| `qne/` | Python quantum node emulator — Alice, Bob, BB84 post-processing, detector, photon wire format, classical channel, metrics, CLI |
-| `p4/bmv2/` | BMv2 V1Model P4 quantum-channel program (loss model + L2 forwarding) |
-| `validation/` | Cross-validation framework — runs the same scenario on QFabric, SeQUeNCe, and NetSquid and checks statistical agreement |
-| `scripts/` | `deploy_fabric.py` (full FABRIC slice provisioning + run), `install_bmv2.sh`, `package_artifact.sh`, and the cross-validation env setup scripts |
-| `notebooks/` | Grouped by workflow: `00_overview` (start here), `fabric/` (slice deploy + run, 01–06), `sequence/` (distributed SeQUeNCe, 07–09), `concepts/` (QKD teaching demos, 10–13). See the reading-order tracks under Quick Start. |
-| `kiso/` | Kiso experiment config for FABRIC runs |
-| `docker/` | `Dockerfile.bmv2` (thin layer on `p4lang/p4c`); prebuilt image published to GHCR |
-| `paper/` | `make_figures.py` + `figures/` (QBER/key-rate sweep plots) |
-| `tests/` | Unit tests for BB84, detector, photon, metrics, and cross-validation (run in CI) |
-| `.github/workflows/` | CI: `tests.yml` (ruff + pytest + sim cross-validation) and `build-bmv2.yml` (GHCR image) |
+| `qne/` | Core library + raw-socket BB84 path (Alice, Bob, detector, BB84 math, Cascade, PA, finite-key, decoy analysis, Eve, HMAC auth, CLI) |
+| `qne-sequence/` | Distributed SeQUeNCe runtime: BB84 / E91 / repeater protocols, `0x7102` reliable L2 link, state service, lookahead timeline |
+| `p4/` | BMv2 P4 program: per-wavelength fiber-loss drop for `0x7101`, lossless forwarding for `0x7102`, counters; PTF tests |
+| `scripts/` | `deploy_fabric.py` (slice, switch, runs, sweeps, cross-validation, netem, repeater bridge), `decoy_sweep.py`, env setup |
+| `validation/` | Platform-neutral scenarios + adapters for QFabric-sim, SeQUeNCe, NetSquid and the statistical agreement test |
+| `notebooks/` | `00_overview` → `fabric/` (01–06 slice workflow) → `sequence/` (07–09 distributed runtime) → `concepts/` (10–13 teaching demos) |
+| `kiso/`, `docker/` | Kiso experiment config; prebuilt BMv2 image (GHCR) |
+| `tests/`, `qne-sequence/tests/` | 120 core + 96 distributed tests (physics-validated, run in CI) |
 
 ## Quick Start
 
-### Notebook workflow — run in order
+### Notebooks — run in order
 
-The notebooks are grouped into folders **by workflow** (`fabric/`, `sequence/`, `concepts/`); the numbers still give the global order. Start at `00_overview`:
-
-| # | Notebook | What it does | Where it runs |
-|---|----------|--------------|---------------|
+| # | Notebook | What it does | Where |
+|---|----------|--------------|-------|
 | 0 | `00_overview` | Orientation + environment check | Anywhere |
-| 1 | `fabric/01_setup_slice` | Provision the FABRIC slice, install BMv2, compile P4, start the switch | FABRIC JupyterHub |
-| 2 | `fabric/02_run_experiment` | Run BB84 across the slice, collect results, verify | FABRIC JupyterHub |
-| 3 | `fabric/03_cross_validation` | Compare QFabric vs SeQUeNCe & NetSquid (one scenario, on the slice) | FABRIC JupyterHub |
-| 4 | `fabric/04_analysis` | Load results and generate all plots & tables | Anywhere (ships sample results) |
-| 5 | `fabric/05_run_all_scenarios` | Run **every** scenario (singles + sweeps) on the slice + QBER/key-rate sweep figures | FABRIC JupyterHub |
-| 6 | `fabric/06_network_effects` | Quantify classical-network (latency/jitter/loss) impact on QKD throughput — the core contribution | FABRIC JupyterHub |
-| 7 | `sequence/07_sequence_emulator` | Distributed **SeQUeNCe** BB84 over the real P4 path (`0x7101` frames + TCP) | FABRIC JupyterHub |
-| 8 | `sequence/08_sequence_scenarios` | SeQUeNCe-emulator scenario sweeps | Anywhere (loopback) / FABRIC |
-| 9 | `sequence/09_entanglement_e91` | Entanglement-based QKD (**E91 / BBM92**) distributed over 2 nodes; CHSH Bell test | Anywhere (loopback) / FABRIC |
-| 10 | `concepts/10_eavesdropper` | Intercept-resend attack: QBER & secure-key-rate vs Eve's tap fraction, the ~11% threshold | Anywhere (local) |
-| 11 | `concepts/11_reconciliation` | Cascade reconciliation: raw keys → identical secret key; leakage & the abort-above-threshold behavior | Anywhere (loopback) |
-| 12 | `concepts/12_repeater` | **Entanglement swapping / repeater chains**: Werner-chain law, CHSH vs hops, heralded-correction control, then the chain across 3 processes | Anywhere (loopback) |
-| 13 | `concepts/13_qkd_security` | Security depth: **finite-key** bounds, **authenticated** classical channel, **biased-basis** BB84, **live decoy-state** analysis | Anywhere (loopback) |
+| 1 | `fabric/01_setup_slice` | Provision the (single-site) slice, start BMv2, load the P4 tables | FABRIC JupyterHub |
+| 2 | `fabric/02_run_experiment` | Raw-socket BB84 across the slice, collect + verify | FABRIC JupyterHub |
+| 4 | `fabric/04_analysis` | Plots and tables from bundled or fresh results | Anywhere |
+| 5 | `fabric/05_run_all_scenarios` | **Every** scenario (singles + distance/attenuation sweeps) with 4-way cross-validation; switch loss updated in place per point | FABRIC JupyterHub |
+| 6 | `fabric/06_network_effects` | **Stress study**: classical latency/jitter/loss vs time-to-key | FABRIC JupyterHub |
+| 7 | `sequence/07_sequence_emulator` | Distributed BB84, both channels raw L2 through the switch, lookahead certificate | FABRIC JupyterHub |
+| 8 | `sequence/08_sequence_scenarios` | Distance sweep of the distributed emulator vs the NetSquid reference | Anywhere (loopback) / FABRIC |
+| 9 | `sequence/09_entanglement_e91` | E91/BBM92 over two nodes, CHSH test, Cascade + PA | Anywhere / FABRIC |
+| 10–13 | `concepts/*` | Eavesdropper, reconciliation, repeater chains, security depth (finite key, auth, biased bases, live decoy) | Anywhere (local) |
 
-> On-slice variants of the concept demos live in `concepts/fabric/` (`*_fabric`, run locally / gitignored).
-
-The numbers are the **FABRIC deployment order** (0→6 is the linear slice workflow). For
-learning or for slice-free work, read by track instead:
-
-- **Deploy on FABRIC:** 0 → 1 → 2 → 3 → 4 → 6
-- **Learn QKD (local, no slice):** 2 (BB84) → 10 (eavesdropper / why it's secure) → 11 (reconciliation → a real shared key) → 13 (finite keys, authentication, biased bases, live decoy)
-- **Simulator cross-checks:** 3, 7, 8
-- **Entanglement:** 9 (E91 over 2 nodes) → 12 (swapping / repeater chains over 3)
-
-> Notebooks 1–2 provision and drive a FABRIC slice (BMv2 is installed on the switch node automatically). Notebooks 0, 4, 8–13 run **anywhere** (including a laptop) — 4 works standalone on bundled sample results; the rest run slice-free over loopback / in-process.
-
-### Prerequisites
-
-- Python 3.11 (for the cross-validation env — see below)
-- A FABRIC account + project + tokens configured in JupyterHub (for notebooks 1–2)
-- BMv2/p4c are installed automatically on the slice's switch node by `scripts/install_bmv2.sh` — no local install needed
+Tracks: **deploy** 0→1→2→5→4 (6 as stress); **learn QKD** 2→10→11→13; **entanglement** 9→12. On-slice variants of the concept demos (`concepts/fabric/*_fabric.ipynb`) are local-only.
 
 ### Install
 
 ```bash
-cd qfabric
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-```
-
-Optional extras: `.[dev]`, `.[fabric]`. The cross-validation simulators are **not** installed here — they live in their own per-node/per-version envs (see "Cross-Validation" below): SeQUeNCe 1.0 needs Python 3.12, NetSquid needs 3.10/3.11.
-
-### Run Unit Tests
-
-```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"            # core + tests
 pytest tests/ -v
+# distributed runtime (Python 3.12, sequence==1.0.0):
+python3.12 -m venv .venv-sequence && source .venv-sequence/bin/activate
+pip install -e ".[dev,sequence]" && (cd qne-sequence && PYTHONPATH=.. pytest tests -q)
 ```
 
-### Cross-Validation — on the FABRIC nodes (notebook 03)
+The cross-validation simulators live in their own per-node envs on the slice (`deploy_fabric.setup_sim_envs`: SeQUeNCe needs Python 3.12, NetSquid needs 3.10/3.11 and netsquid.org credentials in `NETSQUID_USER`/`NETSQUID_PASS`). Missing backends are reported **SKIPPED**; an empty comparison is **INCONCLUSIVE**, never a pass.
 
-The cross-validation compares four BB84 results for the same scenario, **all executed on the FABRIC slice**:
-
-| Backend | Runs on | What it is |
-|---------|---------|------------|
-| QFabric (measured) | BMv2 data plane (notebook 02) | the real emulation over FABRIC |
-| QFabric-sim | switch node (`.venv-qsim`) | pure-Python model, no traffic |
-| SeQUeNCe | alice node (`.venv-seq`, Python 3.12) | SeQUeNCe 1.0 native engine |
-| NetSquid | bob node (`.venv-nsq`) | NetSquid native engine |
-
-SeQUeNCe and NetSquid each drive their **own** engine, so the comparison is genuine independent physics — not a re-run of QFabric's code. Because SeQUeNCe 1.0 needs Python ≥3.12 and NetSquid needs 3.10/3.11 (they can't share an interpreter), they live on different nodes in their own venvs. `deploy_fabric.setup_sim_envs()` builds them (SeQUeNCe via the deadsnakes Python 3.12; NetSquid needs your netsquid.org credentials in `NETSQUID_USER`/`NETSQUID_PASS`), and `run_cross_validation_on_fabric()` runs each adapter on its node and collects the results. Notebook `fabric/03_cross_validation` drives both. Unavailable/failed backends are reported **SKIPPED** (never a false pass).
-
-> Each on-node adapter is just `python -m validation.run_<backend> scenario.yml --json -`. The same adapters can also run locally (in JupyterHub or a laptop) — `validation.compare` runs a backend in-process if importable, or in a separate interpreter set via `QFABRIC_SEQUENCE_PYTHON` / `QFABRIC_NETSQUID_PYTHON`. The `scripts/setup_sequence_env.sh` / `setup_netsquid_env.sh` helpers build those local venvs.
-
-### FABRIC Deployment
+### Run on FABRIC from the command line
 
 ```bash
 python scripts/deploy_fabric.py --scenario validation/scenarios/fabric_1km.yml
-python scripts/deploy_fabric.py --cleanup    # tear down the slice
+python scripts/deploy_fabric.py --cleanup
 ```
 
-Provisions a 3-node slice (Alice / switch / Bob), installs BMv2, compiles the P4 program, and runs BB84 end-to-end. Results land in `results/`.
+## Key parameters
 
-#### Faster switch setup with a prebuilt BMv2 image (optional)
+Fiber loss `P(loss) = 1 − 10^(−α·L/10)` is installed in the switch as `threshold = floor(P·2³²)` (clamped to 2³²−1) and compared against a per-frame 32-bit random draw. Intrinsic QBER ≈ (1−F)/2 for polarization fidelity F, plus dark counts (`dark_count_rate × detection_window`, drawn in **every** slot including lost photons). Scenarios are YAML under `validation/scenarios/`.
 
-Building BMv2 + p4c from source on the switch takes several minutes per slice. To skip it, use the prebuilt image (`docker/Dockerfile.bmv2`, published to GHCR by `.github/workflows/build-bmv2.yml`):
+**Randomness and reproducibility.** `seed` is `None` by default: bits, bases and samples come from OS entropy and two runs give two different keys. Set an integer seed only for reproducible emulation runs (cross-validation, tests) — a seeded run's "secret" is derivable from the scenario file and is not a key.
 
-```bash
-# on the switch node — install Docker + pull the image (one-time)
-bash scripts/setup_switch_docker.sh           # ghcr.io/kthare10/qfabric-bmv2:latest
-# then, in your JupyterHub kernel, enable the Docker path before configuring the switch:
-export QFABRIC_BMV2_IMAGE=ghcr.io/kthare10/qfabric-bmv2:latest
-```
+## What the numbers mean (and do not)
 
-When `QFABRIC_BMV2_IMAGE` is set, `deploy_fabric.configure_switch` compiles the P4 and runs `simple_switch` inside that container (`--privileged --network host`) instead of building from source. Unset it to fall back to the source build.
-
-## Key Parameters
-
-The fiber loss model is `P(loss) = 1 − 10^(−α·L/10)`, where `α` is attenuation (dB/km) and `L` is distance (km). The P4 switch compares a per-packet 32-bit random number against `floor(P(loss) · 2³²)`.
-
-| Parameter | Example (1 km, α=0.2) | Example (50 km) |
-|-----------|----------------------|-----------------|
-| Fiber loss probability | ~4.5% | ~90% |
-| P4 threshold (u32) | ~193 M | ~3.87 B |
-| Expected sift rate | ~50% of detected | ~50% of detected |
-| Intrinsic QBER | ≈ (1−F)/2 (e.g. ~1% at F=0.98) | ≈ (1−F)/2 |
-
-Scenarios are defined in YAML under `validation/scenarios/`. Both single-run and `sweep`-style files are supported.
+- A **measured** QFabric point is a real distributed run whose fiber loss and noise are statistical models in the switch and the detector. It validates the *protocol and the platform*, not photonics.
+- The **decoy-state** pipeline (Ma–Qi–Zhao–Lo bounds, GLLP rate) runs on the distributed TCP-descriptor transport with a Poisson source; it has **not** run through the P4 photon path (the `0x7101` frame has no photon-count field) and no photon-number-splitting adversary is modeled. It is honest key-rate accounting for a realistic source, not a demonstrated defense.
+- **CHSH > 2** across nodes shows the shared-state service and the heralded corrections are correct across real links; it is **not** a physical Bell-inequality test.
+- The **lookahead certificate** (`lookahead.certified`) is meaningful only when a nonzero channel delay was modeled; with `channel_delay = 0` it is reported as not applicable.
+- Finite-key lengths use the TLGR constant; small blocks (≲ 10⁴ sampled bits) legitimately yield **zero** secret bits. Every reconciled run ends with a key-verification tag; a mismatch aborts with no key.
 
 ## License
 
-Licensed under the Apache License, Version 2.0 — see [`LICENSE`](LICENSE).
-
-© 2026 Komal Thareja (kthare10@renci.org)
+Apache License 2.0 — see [`LICENSE`](LICENSE). © 2026 Komal Thareja (kthare10@renci.org)

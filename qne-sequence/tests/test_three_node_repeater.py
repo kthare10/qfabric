@@ -126,12 +126,14 @@ def test_without_heralded_correction_no_key_survives():
 
 def test_per_link_loss_gates_delivery():
     # 20 km @ 0.2 dB/km per link -> p_loss ~ 0.602; both links must survive
-    r = _run_chain(57341, pairs=3000,
+    # 10k attempts: ~1580 delivered pairs -> ~500 key bits, enough to survive the
+    # Cascade leak + the 51-bit key-verification tag with a positive secret
+    r = _run_chain(57341, pairs=10000,
                    extra=("--distance-km", "20", "--attenuation", "0.2"))
     a = r["alice"]
     p_survive = 10 ** (-(0.2 * 20) / 10.0)     # ~0.398
     expected = p_survive ** 2                  # ~0.158
-    assert a["attempts"] == 3000
-    assert abs(a["delivered"] / 3000 - expected) < 0.03
+    assert a["attempts"] == 10000
+    assert abs(a["delivered"] / 10000 - expected) < 0.03
     assert r["repeater"]["swaps"] == a["delivered"]
     assert a["key"] == r["bob"]["key"] is not None   # loss heralds, not corrupts

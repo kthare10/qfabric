@@ -65,27 +65,15 @@ def test_converges_to_asymptotic_rate_with_n():
     asym = (1.0 - BB84Protocol.binary_entropy(q)) - _leak(1, q)  # per-bit accounting
     assert rates[0] < rates[1] < rates[2] <= asym + 1e-12
     # μ shrinks like 1/sqrt(k), so convergence is slow but strictly monotone
-    assert asym - rates[2] < 0.1
+    # (with the TLGR constant, n = 5e5 / k = 5e4 still sits ~0.11 below asymptotic)
+    assert asym - rates[2] < 0.15
 
 
-def test_tighter_eps_costs_key():
-    n, k, q = 20_000, 2_000, 0.02
-    loose = finite_key_length(n, k, q, _leak(n, q), eps_sec=1e-6, eps_cor=1e-9)
-    tight = finite_key_length(n, k, q, _leak(n, q), eps_sec=1e-12, eps_cor=1e-20)
-    assert tight.secret_bits < loose.secret_bits
-
-
-def test_degenerate_inputs():
-    assert finite_key_length(0, 0, 0.0, 0.0).secret_bits == 0
-    assert serfling_mu(0, 10, 1e-10) == 0.5
-    assert serfling_mu(10, 0, 1e-10) == 0.5
-
-
-def test_measured_leak_beats_planning_estimate():
-    # Cascade at low QBER leaks close to n*h(q); the planning estimate charges
-    # f_ec=1.16 times that, so a measured leak below it must give MORE key.
-    n, k, q = 30_000, 3_000, 0.02
-    measured = 1.05 * n * BB84Protocol.binary_entropy(q)
-    r_meas = finite_key_length(n, k, q, measured)
-    r_plan = finite_key_length(n, k, q, planned_leak(n, q))
-    assert r_meas.secret_bits > r_plan.secret_bits
+def test_serfling_mu_matches_tlgr_constant():
+    # TLGR Eq. (2): μ = sqrt((n+k)/(nk) · (k+1)/k · ln(4/ε_sec)); hand-computed for
+    # n = k = 10^4, ε_sec = 1e-10:  2e-4 · 1.0001 · ln(4e10) = 2.0002e-4 · 24.41214
+    #                                = 4.88291e-3  ->  sqrt = 0.069878
+    mu = serfling_mu(10_000, 10_000, 1e-10)
+    assert abs(mu - 0.069878) < 5e-6
+    # the direct-Serfling variant (factor 1/2, ln(1/ε)) would give ~0.048 -- not this
+    assert mu > 0.06

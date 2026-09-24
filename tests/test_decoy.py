@@ -28,7 +28,7 @@ def _clean_channel(eta, mu_s=0.6, mu_d=0.1, mu_v=1e-3):
 
 
 def test_detection_probability():
-    assert detection_probability(0, 0.5, p_dc=1e-6) == 1e-6      # vacuum -> dark count
+    assert abs(detection_probability(0, 0.5, p_dc=1e-6) - 1e-6) < 1e-15  # vacuum -> dark count
     assert abs(detection_probability(1, 0.5, p_dc=0.0) - 0.5) < 1e-12
     assert abs(detection_probability(2, 0.5, p_dc=0.0) - 0.75) < 1e-12  # 1-(1-.5)^2
     assert detection_probability(10, 0.9, p_dc=0.0) <= 1.0

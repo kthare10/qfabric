@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from qne.config import ScenarioConfig
@@ -61,7 +62,12 @@ def create_parser() -> argparse.ArgumentParser:
     )
     alice_parser.add_argument(
         "--auth-key", default=None,
-        help="pre-shared key: HMAC-authenticate the classical channel",
+        help="pre-shared key: HMAC-authenticate the classical channel "
+             "(visible in `ps`; prefer --auth-key-file or $QNE_AUTH_KEY)",
+    )
+    alice_parser.add_argument(
+        "--auth-key-file", default=None,
+        help="read the pre-shared authentication key from this file",
     )
     alice_parser.add_argument(
         "--output", "-o", help="Output JSON file for metrics"
@@ -83,17 +89,46 @@ def create_parser() -> argparse.ArgumentParser:
     )
     bob_parser.add_argument(
         "--auth-key", default=None,
-        help="pre-shared key: HMAC-authenticate the classical channel",
+        help="pre-shared key: HMAC-authenticate the classical channel "
+             "(visible in `ps`; prefer --auth-key-file or $QNE_AUTH_KEY)",
+    )
+    bob_parser.add_argument(
+        "--auth-key-file", default=None,
+        help="read the pre-shared authentication key from this file",
     )
     bob_parser.add_argument(
         "--no-reconcile", dest="reconcile", action="store_false",
         help="skip Cascade error reconciliation + privacy amplification",
     )
     bob_parser.add_argument(
+        "--finite-key", action="store_true",
+        help="size privacy amplification with the finite-key bound (Serfling/TLGR) "
+             "instead of the asymptotic 1-h(Q) accounting",
+    )
+    bob_parser.add_argument("--eps-sec", type=float, default=1e-9,
+                            help="finite-key security parameter (default 1e-9)")
+    bob_parser.add_argument("--eps-cor", type=float, default=1e-15,
+                            help="correctness parameter for key verification (default 1e-15)")
+    bob_parser.add_argument(
+        "--accept-timeout", type=float, default=None,
+        help="seconds to wait for Alice to connect (default: forever)",
+    )
+    bob_parser.add_argument(
         "--output", "-o", help="Output JSON file for metrics"
     )
 
     return parser
+
+
+def resolve_auth_key(args) -> str | bytes | None:
+    """Pre-shared key from --auth-key-file, else $QNE_AUTH_KEY, else --auth-key."""
+    if getattr(args, "auth_key_file", None):
+        with open(args.auth_key_file, "rb") as f:
+            return f.read().strip()
+    env = os.environ.get("QNE_AUTH_KEY")
+    if env:
+        return env
+    return args.auth_key
 
 
 def main_alice() -> None:
@@ -129,7 +164,7 @@ def _run_alice(args: argparse.Namespace) -> None:
         bob_port=args.bob_port,
         dst_mac=_mac_str_to_bytes(getattr(args, "dst_mac", None)),
         src_mac=_mac_str_to_bytes(getattr(args, "src_mac", None)),
-        auth_key=args.auth_key,
+        auth_key=resolve_auth_key(args),
     )
     metrics = alice.run()
     if args.output:
@@ -146,8 +181,12 @@ def _run_bob(args: argparse.Namespace) -> None:
         interface=args.interface,
         classical_host=args.host,
         classical_port=args.port,
-        auth_key=args.auth_key,
+        auth_key=resolve_auth_key(args),
         reconcile=getattr(args, "reconcile", True),
+        finite_key=getattr(args, "finite_key", False),
+        eps_sec=getattr(args, "eps_sec", 1e-9),
+        eps_cor=getattr(args, "eps_cor", 1e-15),
+        accept_timeout=getattr(args, "accept_timeout", None),
     )
     metrics = bob.run()
     if args.output:

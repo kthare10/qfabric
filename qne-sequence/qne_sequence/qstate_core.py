@@ -13,11 +13,13 @@ Design notes:
     chain's multi-qubit state and entanglement swapping (``bell_measure``) extend
     naturally — this is "designed for multi-hop".
   * Noise is a **Werner state** ρ = w·|Φ+⟩⟨Φ+| + (1−w)·I/4, sampled per pair
-    (with prob depending on w, emit one of the four Bell states). With w = F this
-    yields matching-basis QBER = (1−F)/2 AND CHSH S = 2√2·F, so the key-error rate
-    and the Bell-inequality violation degrade together — exactly what makes an
-    entanglement (E91) security test meaningful, and it keeps the ``fidelity`` knob
-    identical to the BB84 path.
+    (with prob depending on w, emit one of the four Bell states). The ``fidelity``
+    knob IS the Werner weight w — NOT the Bell-state fidelity ⟨Φ+|ρ|Φ+⟩ = (3w+1)/4
+    (results report both as ``werner_w`` / ``bell_fidelity``). With w the
+    matching-basis QBER = (1−w)/2 AND CHSH S = 2√2·w, so the key-error rate and the
+    Bell-inequality violation degrade together — exactly what makes an entanglement
+    (E91) security test meaningful — and w plays the same role the polarization
+    fidelity F plays on the BB84 path (QBER = (1−F)/2).
   * Measurement is projective at an arbitrary angle θ in the X–Z plane (θ=0 → Z
     basis, θ=π/2 → X basis, θ=π/4, 3π/4 → the E91/CHSH angles), driven by a random
     sample in [0,1) for reproducibility (mirrors SeQUeNCe's ``meas_samp``).
@@ -79,7 +81,9 @@ class QStateRegister:
     # -- allocation ------------------------------------------------------------
 
     def create_bell_pair(self, fidelity: float = 1.0) -> tuple[int, int]:
-        """Allocate two qubits in a Werner state of the given fidelity.
+        """Allocate two qubits in a Werner state of weight w = ``fidelity``.
+
+        NOTE: ``fidelity`` is the Werner weight w, not ⟨Φ+|ρ|Φ+⟩ = (3w+1)/4.
 
         Returns (qubit_id_a, qubit_id_b). With prob mass matching
         ρ = F·|Φ+⟩⟨Φ+| + (1−F)·I/4, emit |Φ+⟩, else a uniformly-chosen other Bell

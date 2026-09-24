@@ -21,7 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from time import time_ns
+from time import sleep, time_ns
 
 from sequence.topology.node import QKDNode
 from sequence.kernel.event import Event
@@ -30,7 +30,7 @@ from sequence.kernel.process import Process
 from qne.detector import Detector
 
 from .rt_timeline import RealTimeTimeline
-from .listener import Link, Listener
+from .listener import Link, Listener, lookahead_report
 from .remote_channel import RemoteClassicalChannel, RemoteQuantumChannel
 from .raw_photon import RawQuantumChannel, RawPhotonReceiver
 from .distributed_qkd import DistributedBB84, pair_distributed
@@ -80,7 +80,7 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
              mu_vacuum: float = 0.001, decoy_probs: str = "0.7,0.2,0.1",
              classical_transport: str = "tcp",
              classical_iface: str | None = None,
-             epoch_seed_ns: int = 0) -> dict:
+             epoch_seed_ns: int = 0, time_authority: str | None = None) -> dict:
     role = _ROLES[role_name]
 
     # Photon loss policy (independent of transport):
@@ -110,7 +110,25 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         }
         loss_where = "none"     # channel stays lossless; thinning already applied
 
-    tl = RealTimeTimeline(time_scale=time_scale)
+    # Timeline: wall-clock paced (default) or driven by the central time authority
+    # (conservative synchronization -- see time_authority.py). The authority
+    # needs the classical link's message counters, which exist only after the
+    # link is built below, so the counter callable is bound late.
+    ta_client = None
+    _link_ref: list = []
+    _guards: list = []
+    if time_authority:
+        from .conservative_timeline import ConservativeTimeline
+        from .time_authority import TimeClient
+        ta_host, ta_port = time_authority.rsplit(":", 1)
+        ta_client = TimeClient(ta_host, int(ta_port), name, lookahead_ps=channel_delay)
+
+        def _counts():
+            lk = _link_ref[0] if _link_ref else None
+            return (lk.tx_count, lk.rx_count) if lk is not None else (0, 0)
+        tl = ConservativeTimeline(ta_client, _counts, wall_guards=_guards)
+    else:
+        tl = RealTimeTimeline(time_scale=time_scale)
     node = QKDNode(name, tl, stack_size=1, seed=seed)
 
     # captured result(s)
@@ -171,6 +189,7 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         link.serve(host, port)
     else:
         link.connect(host, port)
+    _link_ref.append(link)
 
     # One shared sim-time origin: Bob is the time master, Alice adopts his epoch
     # corrected by a Cristian offset estimate (timesync.py). This is what lets
@@ -212,6 +231,16 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
             node.qchannels[peer] = RawQuantumChannel(iface)  # unused TX placeholder
             raw_rx = RawPhotonReceiver(iface, tl, dbb, peer, delay=channel_delay)
             raw_rx.start()
+            if ta_client is not None and drain_ps > 0:
+                # photons are not counted by the authority (lossy by design): before
+                # Bob runs any batch of events, require the photon socket to have been
+                # quiet for the drain window so stragglers are already in the queue
+                _drain_ns = drain_ps // 1000
+
+                def _photon_quiescence(_rx=raw_rx, _w=_drain_ns):
+                    while not _rx.quiescent(_w):
+                        sleep(min(_w / 1e9, 0.05))
+                _guards.append(_photon_quiescence)
         # classical frames only on the TCP link
         listener = Listener(tl, node, dbb, delay=channel_delay)
     else:
@@ -227,8 +256,11 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
     tl.init()
 
     # the epoch negotiated in the handshake above — both timelines now agree on
-    # the wall<->sim mapping to within ~RTT/2
+    # the wall<->sim mapping to within ~RTT/2 (irrelevant under the authority,
+    # whose clock is logical; kept so the timesync diagnostics are still reported)
     tl.set_epoch(epoch_ns)
+    if ta_client is not None:
+        ta_client.connect()
 
     if role == 0:  # Alice kicks off after the start barrier
         tl.schedule(Event(tl.now() + _START_BARRIER_PS,
@@ -239,35 +271,67 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
     tl.run()
     if raw_rx is not None:
         raw_rx.stop()
+    if ta_client is not None:
+        # Leave the grant protocol here: post-processing below is a strict
+        # request/response ping-pong that needs no grants (the waiting side runs
+        # nothing until the message lands), and a node still listed as live but no
+        # longer reporting would block the peer's next grant forever. The final
+        # counts go with the bye so nothing in flight is lost from the totals.
+        ta_client.bye(link.tx_count, link.rx_count)
 
     # Post-processing over the (now idle) TCP link: Cascade reconciliation then
     # privacy amplification. Both sides hold key_bits in the same key_order; we swap
     # the link into synchronous RPC mode now that the timeline has stopped.
     from .remote_qm import RpcChannel
-    from .reconcile_link import bits_to_int, drive_cascade, serve_parities
+    from .reconcile_link import (KeyVerificationError, bits_to_int, drive_cascade,
+                                 serve_parities)
 
     reconciled = False
+    verification_failed = False
     corrections = bits_leaked = 0
     rpc = None
     sift_key = list(getattr(dbb, "key_bits", None) or [])   # aligned key on both sides
     final_key = sift_key                                    # unamplified fallback
     qber = dbb.metrics.get("qber", 0.0)
+    # PA must erase the PHASE error: e_x for efficient (biased-basis) BB84, Q
+    # otherwise. Cascade block sizing still uses the bit error Q.
+    qber_x = dbb.metrics.get("qber_x")
+    qber_pa = max(qber, qber_x) if (basis_bias != 0.5 and qber_x is not None) else None
     # Above the ~11% threshold there's no secure key, so abort rather than waste
     # effort reconciling. Both sides see the same QBER, so they agree (no deadlock).
     secure_ok = dbb.metrics.get("secure_fraction", 0.0) > 0
+    # Decoy mode: the GLLP single-photon budget (per-pulse rate x pulses) gates
+    # reconciliation and CAPS the extracted length -- the ordinary BB84 fraction
+    # alone would let a run extract key the decoy bounds do not cover.
+    decoy_cap = None
+    decoy_info = dbb.metrics.get("decoy")
+    if decoy_info is not None:
+        decoy_cap = int(decoy_info.get("decoy_key_bits", 0))
+        secure_ok = secure_ok and decoy_cap > 0
     if do_reconcile and sift_key and secure_ok:
         # rebinds link.on_frame to a buffered queue; Cascade traffic is classical
         # channel traffic, so it gets the same lookahead pacing as the protocol
-        rpc = RpcChannel(link, delay_ps=channel_delay,
-                         peer_offset_ns=peer_offset_ns)
+        # Post-processing is a strict request/response ping-pong, so the message
+        # order IS the schedule; under the authority we pace it on the LOGICAL
+        # clock (continuing from where the timeline stopped) so every Cascade
+        # message is delivered at exactly t_send + delay in simulation time and
+        # is covered by the same certificate. Wall-clock mode keeps real sleeps.
+        rpc = RpcChannel(link, delay_ps=channel_delay, peer_offset_ns=peer_offset_ns,
+                         logical=(ta_client is not None), logical_start_ps=tl.time)
         finite = ({"n_sample": int(result.get("num_sampled") or 0),
                    "eps_sec": eps_sec, "eps_cor": eps_cor} if finite_key else None)
-        if role == 1:            # Bob drives Cascade + announces the PA hash
-            final_key, corrections, bits_leaked = drive_cascade(
-                rpc, sift_key, qber, seed + 303, passes=cascade_passes, finite=finite)
-        else:                    # Alice answers parities, then applies the same PA hash
-            final_key, corrections, bits_leaked = serve_parities(rpc, sift_key)
-        reconciled = True
+        try:
+            if role == 1:        # Bob drives Cascade + announces the PA hash
+                final_key, corrections, bits_leaked = drive_cascade(
+                    rpc, sift_key, qber, seed + 303, passes=cascade_passes, finite=finite,
+                    qber_pa=qber_pa, max_out_len=decoy_cap)
+            else:                # Alice answers parities, then applies the same PA hash
+                final_key, corrections, bits_leaked = serve_parities(rpc, sift_key)
+            reconciled = True
+        except KeyVerificationError as e:
+            # residual Cascade error caught by the verification tag: NO key output
+            corrections, bits_leaked = e.corrections, e.bits_leaked
+            final_key, reconciled, verification_failed = [], False, True
 
     link.close()
 
@@ -277,14 +341,23 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
     if finite_key and reconciled:
         from qne.finite_key import finite_key_length
         fk = finite_key_length(len(sift_key), int(result.get("num_sampled") or 0),
-                               qber, bits_leaked, eps_sec=eps_sec, eps_cor=eps_cor)
+                               qber if qber_pa is None else qber_pa, bits_leaked,
+                               eps_sec=eps_sec, eps_cor=eps_cor)
         finite_info = {"secret_bits": fk.secret_bits,
                        "asymptotic_bits": fk.asymptotic_bits,
                        "qber_upper": fk.qber_upper, "mu": fk.mu,
                        "eps_sec": eps_sec, "eps_cor": eps_cor}
 
     # Report the extracted secret key — reconciled+amplified → identical bit-for-bit.
-    reconciled_key = bits_to_int(final_key) if final_key else result.get("key")
+    # A reconciled run reports ONLY the amplified secret (None when the accounting
+    # allows zero bits -- never the raw sift key, which differs between the sides
+    # and is not secret). Unreconciled runs still echo the raw key for debugging.
+    if verification_failed:
+        reconciled_key = None
+    elif reconciled:
+        reconciled_key = bits_to_int(final_key) if final_key else None
+    else:
+        reconciled_key = result.get("key")
     secure_key_len = len(final_key) if reconciled else 0
     return {
         "role": role,
@@ -305,6 +378,7 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         "secure_fraction": result.get("secure_fraction"),
         "final_key_bits": result.get("final_key_bits"),
         "reconciled": reconciled,
+        "verification_failed": verification_failed,
         "corrections": corrections,
         "bits_leaked": bits_leaked,
         "secure_key_bits": secure_key_len,
@@ -335,14 +409,23 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         # timeline phase (listener) and the Cascade RPC phase.
         "channel_delay_ps": channel_delay,
         "timesync": timesync_info,
-        "lookahead": {
-            "on_time_events": listener.on_time_events
-                              + (rpc.on_time_events if rpc else 0),
-            "late_events": listener.late_events
-                           + (rpc.late_events if rpc else 0),
-            "max_lateness_ps": max(listener.max_lateness_ps,
-                                   (rpc.max_lateness_ns * 1000) if rpc else 0),
-        },
+        # "wall-clock": events fire at epoch + T*time_scale (lookahead certificate
+        # can fail); "authority": logical clock advanced by central LBTS grants
+        # (late_events == 0 by construction; rounds = grants requested)
+        "timeline": ("authority" if ta_client is not None else "wall-clock"),
+        # simulation time the post-processing (Cascade + PA) phase consumed: the
+        # round-trip cost of reconciliation in modeled terms, deterministic under
+        # the authority (N round trips x 2 x channel_delay), 0 in wall-clock mode
+        "postprocess_sim_ps": (rpc.sim_elapsed_ps if rpc is not None else 0),
+        "authority": ({"endpoint": time_authority, "rounds": tl.rounds,
+                       "reports": ta_client.reports, "rereports": tl.rereports,
+                       "finished_by_authority": tl.finished_by_authority,
+                       "timed_out": tl.timed_out} if ta_client is not None else None),
+        "lookahead": lookahead_report(
+            listener.on_time_events + (rpc.on_time_events if rpc else 0),
+            listener.late_events + (rpc.late_events if rpc else 0),
+            max(listener.max_lateness_ps, (rpc.max_lateness_ns * 1000) if rpc else 0),
+            channel_delay),
     }
 
 
@@ -439,6 +522,15 @@ def main(argv=None) -> int:
                          "for the time master; 0 = master picks it locally. The "
                          "interim central-timeline step: one origin for a whole "
                          "multi-node run (metric alignment), owned by the run-plan.")
+    ap.add_argument("--time-authority", default=None, metavar="HOST:PORT",
+                    help="put the run on the GLOBAL TIMELINE instead of the wall "
+                         "clock, so no frame can arrive late whatever the wire does. "
+                         "BB84 needs the coordinator at HOST:PORT (python -m "
+                         "qne_sequence.time_authority) because its protocol phase "
+                         "free-runs on a local event queue and needs LBTS grants; "
+                         "E91 and the repeater chain never free-run (every action "
+                         "waits on a receive), so they use the shared logical clock "
+                         "alone and the endpoint is unused for them.")
     ap.add_argument("--channel-delay", default="0",
                     help="modeled one-way channel delay in ps, or 'auto' to "
                          "derive it from --distance-km (~4.9e6 ps per km — the "
@@ -504,6 +596,9 @@ def main(argv=None) -> int:
                      if args.channel_delay == "auto" else int(args.channel_delay))
 
     if args.protocol == "repeater":
+        if args.classical_transport == "l2":
+            ap.error("--protocol repeater has no raw-L2 classical backend yet; its "
+                     "three links are TCP. Drop --classical-transport l2 (open item).")
         from .distributed_repeater import ROLES as _ROLES3
         from .distributed_repeater import run_repeater_node
         loss_p = (0.0 if args.loss == "none"
@@ -524,7 +619,10 @@ def main(argv=None) -> int:
             bob_host=args.bob_host, repeater_host=args.repeater_host,
             repeater_hosts=(args.repeater_hosts.split(",")
                             if args.repeater_hosts else None),
-            channel_delay=channel_delay)
+            channel_delay=channel_delay,
+            # the chain never free-runs, so the global timeline needs only the
+            # shared logical clock here -- no coordinator process
+            logical_clock=bool(args.time_authority))
         print(json.dumps(result))
         return 0
 
@@ -542,7 +640,8 @@ def main(argv=None) -> int:
             auth_key=args.auth_key, channel_delay=channel_delay,
             classical_transport=args.classical_transport,
             classical_iface=args.classical_iface,
-            src_mac=args.src_mac, dst_mac=args.dst_mac)
+            src_mac=args.src_mac, dst_mac=args.dst_mac,
+            logical_clock=bool(args.time_authority))
         print(json.dumps(result))
         return 0
 
@@ -561,7 +660,8 @@ def main(argv=None) -> int:
                       args.mu_decoy, args.mu_vacuum, args.decoy_probs,
                       classical_transport=args.classical_transport,
                       classical_iface=args.classical_iface,
-                      epoch_seed_ns=args.epoch_ns)
+                      epoch_seed_ns=args.epoch_ns,
+                      time_authority=args.time_authority)
     print(json.dumps(result))
     return 0
 

@@ -45,10 +45,11 @@ from qne.bb84 import BB84Protocol
 
 from .distributed_e91 import _key_positions
 from .e91 import _ANGLE, _CHSH, _MODES, chsh_value
-from .listener import Link
+from .listener import Link, lookahead_report
 from .quantum_state_service import QuantumStateService
-from .reconcile_link import bits_to_int, drive_cascade, serve_parities
-from .remote_qm import RpcChannel
+from .reconcile_link import (KeyVerificationError, bits_to_int, drive_cascade,
+                             serve_parities)
+from .remote_qm import LogicalClock, RpcChannel
 from .repeater import chain_chsh, chain_fidelity, chain_qber
 from .timesync import sync_link
 
@@ -70,7 +71,8 @@ def run_repeater_node(role: int, name: str, host: str, *, port_ab: int,
                       bob_host: str | None = None,
                       repeater_host: str | None = None,
                       repeater_hosts: list[str] | None = None,
-                      channel_delay: int = 0) -> dict:
+                      channel_delay: int = 0,
+                      logical_clock: bool = False) -> dict:
     """Run one node of the N-process repeater chain; return its result dict.
 
     Start order (listeners first): bob, stations, alice — though ``Link.connect``
@@ -110,36 +112,57 @@ def run_repeater_node(role: int, name: str, host: str, *, port_ab: int,
     links: list[Link] = []
     rpcs: list[RpcChannel] = []
     syncs: list[dict] = []
+    # ONE clock per NODE, shared by all of its links (a station has two, Alice has
+    # K+1): a node is a single sequential entity and cannot be at two simulation
+    # times at once. Serving several inbound links therefore advances one monotonic
+    # clock -- the node is modelled as a sequential server with zero service time,
+    # and its FIXED serve order (station index, then Bob) keeps the run
+    # deterministic regardless of which request physically arrived first. Unlike
+    # BB84's protocol phase no node ever free-runs (every action waits on a
+    # receive), so no LBTS grants are needed -- see time_authority.py.
+    clock = LogicalClock() if logical_clock else None
 
     def _paced_rpc(link: Link, serving: bool) -> RpcChannel:
         # Per-link clock sync (before start_rx), then a lookahead-paced channel:
         # every classical message on this link is delivered at t_send + delay.
         offset_ns, rtt_ns = sync_link(link, serving=serving)
         syncs.append({"offset_ns": offset_ns, "rtt_ns": rtt_ns})
-        rpc = RpcChannel(link, delay_ps=channel_delay, peer_offset_ns=offset_ns)
+        rpc = RpcChannel(link, delay_ps=channel_delay, peer_offset_ns=offset_ns,
+                         clock=clock)
         rpcs.append(rpc)
         return rpc
 
     try:
         if role == ROLES["bob"]:
+            # Open EVERY inbound port before blocking on the first accept. Bob used
+            # to accept Alice first and only then listen for the stations, so a
+            # station connecting in between got ECONNREFUSED, burned its retry
+            # budget and died -- after which Alice hung forever in the station's
+            # clock handshake. Binding up front removes that race entirely.
             ab = Link(auth_key=auth_key)
-            ab.serve(host, port_ab, timeout=_SERVE_TIMEOUT)
-            rpc_a = _paced_rpc(ab, serving=True)
-            ab.start_rx()
-            links = [ab]
-            rpc_stations = []
+            ab.listen(host, port_ab, timeout=_SERVE_TIMEOUT)
+            station_links = []
             for i in range(1, num_stations + 1):
                 rb = Link(auth_key=auth_key)
-                rb.serve(host, _port_rb(i), timeout=_SERVE_TIMEOUT)
+                rb.listen(host, _port_rb(i), timeout=_SERVE_TIMEOUT)
+                station_links.append(rb)
+            links = [ab, *station_links]
+
+            ab.accept_conn()
+            rpc_a = _paced_rpc(ab, serving=True)
+            ab.start_rx()
+            rpc_stations = []
+            for rb in station_links:
+                rb.accept_conn()
                 rpc_stations.append(_paced_rpc(rb, serving=True))
                 rb.start_rx()
-                links.append(rb)
             result = _run_bob(rpc_a, rpc_stations, num_pairs, mode,
                               sample_fraction, seed, do_reconcile,
                               cascade_passes, fk_eps, apply_correction)
         elif role == ROLES["repeater"]:
             ar = Link(auth_key=auth_key)
-            ar.serve(host, _port_ar(station_index), timeout=_SERVE_TIMEOUT)
+            ar.listen(host, _port_ar(station_index), timeout=_SERVE_TIMEOUT)
+            ar.accept_conn()
             rpc_a = _paced_rpc(ar, serving=True)
             rb = Link(auth_key=auth_key)
             rb.connect(bob_host, _port_rb(station_index))
@@ -179,19 +202,25 @@ def run_repeater_node(role: int, name: str, host: str, *, port_ab: int,
         "role": role, "name": name, "mode": mode,
         "num_nodes": num_stations + 2, "num_links": num_stations + 1,
         "num_stations": num_stations, "corrected": apply_correction,
+        "timeline": ("logical" if logical_clock else "wall-clock"),
+        "sim_elapsed_ps": (clock.elapsed_ps if clock is not None else 0),
         "quantum_transport": "entangled-state-service",
         "tx_frames": sum(lk.tx_count for lk in links),
         "rx_frames": sum(lk.rx_count for lk in links),
         "authenticated": auth_key is not None,
         "auth_failures": sum(lk.auth_failures for lk in links),
+        "short_frames": sum(getattr(lk, "short_frames", 0) for lk in links),
         "channel_delay_ps": channel_delay,
         "timesync": syncs,
-        "lookahead": {
-            "on_time_events": sum(r.on_time_events for r in rpcs),
-            "late_events": sum(r.late_events for r in rpcs),
-            "max_lateness_ps": max((r.max_lateness_ns for r in rpcs),
-                                   default=0) * 1000,
-        },
+        "lookahead": lookahead_report(
+            sum(r.on_time_events for r in rpcs),
+            sum(r.late_events for r in rpcs),
+            max((r.max_lateness_ns for r in rpcs), default=0) * 1000,
+            channel_delay),
+        # per-link Werner weight w (the ``fidelity`` knob) and the corresponding
+        # single-link Bell-state fidelity (3w+1)/4; end-to-end predictions below
+        "werner_w": fidelity,
+        "bell_fidelity_link": (3.0 * fidelity + 1.0) / 4.0,
     })
     if role == ROLES["repeater"]:
         result["station_index"] = station_index
@@ -301,11 +330,15 @@ def _run_alice(rpc_stations, rpc_b, num_pairs, fidelity, loss_probability, mode,
     corrections = bits_leaked = 0
     secure_len = 0
     if do_reconcile and key_only and secure_fraction > 0:   # abort above ~11% QBER
-        final, corrections, bits_leaked = serve_parities(
-            rpc_b, [a_bits[k] for k in key_only])
-        alice_key = bits_to_int(final)
-        secure_len = len(final)
-        reconciled = True
+        try:
+            final, corrections, bits_leaked = serve_parities(
+                rpc_b, [a_bits[k] for k in key_only])
+            alice_key = bits_to_int(final)
+            secure_len = len(final)
+            reconciled = True
+        except KeyVerificationError as e:                    # residual error: no key
+            corrections, bits_leaked = e.corrections, e.bits_leaked
+            alice_key = None
 
     finite_info = None
     if fk_eps is not None and reconciled:
@@ -383,11 +416,15 @@ def _run_bob(rpc_a, rpc_stations, num_pairs, mode, sample_fraction, seed,
     if do_reconcile and key_only and summary["secure_fraction"] > 0:
         finite = ({"n_sample": summary["num_sampled"], **fk_eps}
                   if fk_eps is not None else None)
-        key_arr, corrections, bits_leaked = drive_cascade(
-            rpc_a, key_arr, summary["qber"], seed + 303, passes=cascade_passes,
-            finite=finite)
-        secure_len = len(key_arr)
-        reconciled = True
+        try:
+            key_arr, corrections, bits_leaked = drive_cascade(
+                rpc_a, key_arr, summary["qber"], seed + 303, passes=cascade_passes,
+                finite=finite)
+            secure_len = len(key_arr)
+            reconciled = True
+        except KeyVerificationError as e:                    # residual error: no key
+            corrections, bits_leaked = e.corrections, e.bits_leaked
+            key_arr = []
 
     finite_info = None
     if fk_eps is not None and reconciled:

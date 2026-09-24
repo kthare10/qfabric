@@ -33,6 +33,7 @@ class DetectorConfig:
     dark_count_rate: float = 10.0  # Hz
     dead_time: float = 0.0  # nanoseconds
     timing_jitter: float = 0.0  # nanoseconds
+    detection_window: float = 1e-9  # seconds; dark_count_prob = rate * window
 
 
 @dataclass
@@ -62,13 +63,27 @@ class ScenarioConfig:
         channel: Quantum channel parameters.
         detector: Detector model parameters.
         protocol: BB84 protocol parameters.
-        seed: Random seed for reproducibility.
+        seed: Random seed for reproducibility. ``None`` (the default) draws every
+            random choice -- Alice's bits and bases, Bob's bases, the QBER sample,
+            channel and detector noise -- from OS entropy, so two runs of the same
+            scenario produce different keys. Set an integer ONLY for reproducible
+            emulation runs (cross-validation, regression tests): a seeded run's
+            "secret" key is derivable by anyone holding the scenario file.
     """
     name: str = "default"
     channel: ChannelConfig = field(default_factory=ChannelConfig)
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     protocol: ProtocolConfig = field(default_factory=ProtocolConfig)
-    seed: int = 42
+    seed: int | None = None
+
+    def derived_seed(self, offset: int) -> int | None:
+        """Per-component seed (``seed + offset``), or None when unseeded."""
+        return None if self.seed is None else self.seed + offset
+
+    @property
+    def reproducible(self) -> bool:
+        """True when the run is seeded (and therefore NOT cryptographically secret)."""
+        return self.seed is not None
 
     @property
     def loss_probability(self) -> float:
@@ -84,7 +99,9 @@ class ScenarioConfig:
         Returns an integer in [0, 2^32) such that if a uniform random
         32-bit number is less than this threshold, the photon is dropped.
         """
-        return int(self.loss_probability * (2**32))
+        # Clamp: P -> 1.0 would give exactly 2**32, which overflows the P4
+        # bit<32> to 0 and turns a fully opaque fiber into a lossless one.
+        return min(int(self.loss_probability * (2**32)), 2**32 - 1)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ScenarioConfig:
@@ -113,6 +130,7 @@ class ScenarioConfig:
                 dark_count_rate=detector_data.get("dark_count_rate", 10.0),
                 dead_time=detector_data.get("dead_time", 0.0),
                 timing_jitter=detector_data.get("timing_jitter", 0.0),
+                detection_window=detector_data.get("detection_window", 1e-9),
             ),
             protocol=ProtocolConfig(
                 num_photons=protocol_data.get("num_photons", 100_000),
@@ -121,7 +139,7 @@ class ScenarioConfig:
                 wavelength=protocol_data.get("wavelength", 0),
                 basis_bias=protocol_data.get("basis_bias", 0.5),
             ),
-            seed=data.get("seed", 42),
+            seed=data.get("seed"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -138,6 +156,7 @@ class ScenarioConfig:
                 "dark_count_rate": self.detector.dark_count_rate,
                 "dead_time": self.detector.dead_time,
                 "timing_jitter": self.detector.timing_jitter,
+                "detection_window": self.detector.detection_window,
             },
             "protocol": {
                 "num_photons": self.protocol.num_photons,

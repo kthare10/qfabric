@@ -18,19 +18,26 @@
 """PTF data plane test for P4 quantum channel loss model.
 
 Sends 10K photon packets through BMv2 and verifies that the drop rate
-matches the configured loss threshold within 2 standard deviations.
+matches the installed loss threshold within 2 standard deviations. Also
+checks that EtherType 0x7102 classical frames are forwarded without loss.
 
-Requires: PTF (pip install ptf), BMv2 running with veth topology.
+Requires: PTF (pip install ptf), BMv2 running with veth topology, and
+simple_switch_CLI on PATH to read the installed wavelength-0 threshold.
 Usage: sudo ptf --test-dir p4/tests --pypath . --interface 0@veth1 --interface 1@veth3
 """
 
 import math
+import re
 import struct
+import subprocess
+import time
 
+import ptf
 import ptf.testutils as testutils
 from ptf.base_tests import BaseTest
 
 ETHERTYPE_PHOTON = 0x7101
+ETHERTYPE_CLASSICAL = 0x7102
 ALICE_MAC = "02:00:00:00:00:01"
 BOB_MAC = "02:00:00:00:00:02"
 
@@ -58,39 +65,62 @@ def build_photon_frame(seq_num, basis=0, state=0, wavelength=0):
     return frame
 
 
+def _count_received_packets(test, port, ethertype):
+    """Count matching frames until PTF reports a receive timeout."""
+    received = 0
+    ether_type_bytes = struct.pack("!H", ethertype)
+    while True:
+        try:
+            result = testutils.dp_poll(test, timeout=0.1)
+        except TimeoutError:
+            break
+        if isinstance(result, test.dataplane.PollFailure):
+            break
+        if isinstance(result, tuple) and not hasattr(result, "packet"):
+            received_port, packet = result[1:3]
+        else:
+            received_port, packet = result.port, result.packet
+        if packet is None:
+            break
+        if received_port == port and bytes(packet)[12:14] == ether_type_bytes:
+            received += 1
+    return received
+
+
 class QuantumChannelLossTest(BaseTest):
     """Test that P4 quantum channel drops photons at the configured rate."""
 
     NUM_PACKETS = 10_000
-    # Default threshold for 1km @ 0.2 dB/km: ~4.5% loss
-    EXPECTED_LOSS_RATE = 1.0 - 10 ** (-0.2 * 1.0 / 10.0)
     SIGMA_TOLERANCE = 2  # Accept within 2 standard deviations
 
     def setUp(self):
         BaseTest.setUp(self)
+        self.dataplane = ptf.dataplane_instance
+        self.dataplane.flush()
         # Port 0 = veth1 (Alice), Port 1 = veth3 (Bob)
         self.alice_port = 0
         self.bob_port = 1
+        dump = subprocess.run(
+            ["simple_switch_CLI", "--thrift-port", "9090"],
+            input="table_dump_entry_from_key quantum_channel_params 0\n",
+            capture_output=True, text=True, check=True,
+        ).stdout
+        threshold_match = re.search(
+            r"\bset_channel_params\b\s*-\s*(0x[0-9a-f]+|[0-9]+)\b", dump, re.IGNORECASE,
+        )
+        if threshold_match is None:
+            raise RuntimeError(f"Cannot read installed photon-loss threshold:\n{dump}")
+        self.EXPECTED_LOSS_RATE = int(threshold_match.group(1), 0) / 2**32
 
     def runTest(self):
-        received = 0
-
         for seq in range(self.NUM_PACKETS):
             frame = build_photon_frame(seq_num=seq)
             testutils.send_packet(self, self.alice_port, frame)
 
         # Wait and count received packets
         # Use a timeout to collect all packets that arrive
-        import time
         time.sleep(2)
-
-        while True:
-            try:
-                (port, pkt) = testutils.dp_poll(self, timeout=0.1)
-                if port == self.bob_port:
-                    received += 1
-            except Exception:
-                break
+        received = _count_received_packets(self, self.bob_port, ETHERTYPE_PHOTON)
 
         dropped = self.NUM_PACKETS - received
         observed_loss_rate = dropped / self.NUM_PACKETS
@@ -115,4 +145,33 @@ class QuantumChannelLossTest(BaseTest):
         assert lower_bound <= dropped <= upper_bound, (
             f"Drop count {dropped} outside {self.SIGMA_TOLERANCE}σ range "
             f"[{lower_bound:.0f}, {upper_bound:.0f}]"
+        )
+
+
+class ClassicalChannelForwardingTest(BaseTest):
+    """Test that EtherType 0x7102 frames bypass photon loss."""
+
+    NUM_PACKETS = 100
+
+    def setUp(self):
+        BaseTest.setUp(self)
+        self.dataplane = ptf.dataplane_instance
+        self.dataplane.flush()
+        self.alice_port = 0
+        self.bob_port = 1
+
+    def runTest(self):
+        ethernet_header = (
+            bytes.fromhex(BOB_MAC.replace(":", ""))
+            + bytes.fromhex(ALICE_MAC.replace(":", ""))
+            + struct.pack("!H", ETHERTYPE_CLASSICAL)
+        )
+        for sequence_num in range(self.NUM_PACKETS):
+            frame = (ethernet_header + struct.pack("!I", sequence_num)).ljust(60, b"\x00")
+            testutils.send_packet(self, self.alice_port, frame)
+
+        time.sleep(2)
+        received = _count_received_packets(self, self.bob_port, ETHERTYPE_CLASSICAL)
+        assert received == self.NUM_PACKETS, (
+            f"Classical channel lost {self.NUM_PACKETS - received} of {self.NUM_PACKETS} frames"
         )

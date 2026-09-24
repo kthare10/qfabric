@@ -28,14 +28,20 @@ This module implements the standard finite-key recipe (the Tomamichel–Lim–Gi
 Renner form, Nat. Commun. 3, 634 (2012)):
 
   1. **Parameter-estimation penalty.** The QBER on the k disclosed bits is corrected
-     upward by the Serfling (sampling-without-replacement) fluctuation
+     upward by the statistical fluctuation of TLGR Eq. (2),
 
-         μ = sqrt( (n + k)(k + 1) / (2·n·k²) · ln(1/ε_PE) )
+         μ = sqrt( (n + k)/(n·k) · (k + 1)/k · ln(4/ε_sec) )
 
-     so that Q_key ≤ Q_obs + μ except with probability ε_PE.
+     so that Q_key ≤ Q_obs + μ except with a probability absorbed in ε_sec. (A direct
+     Serfling derivation admits a factor 1/2 inside the root and a smaller log
+     argument; we implement the published constant so the number is auditable
+     against the paper — conservative can only shorten the key, never overstate it.)
   2. **Extractable length.**
 
-         ℓ = n·(1 − h(Q_obs + μ)) − leak_EC − log2(2/ε_cor) − 2·log2(1/(2·ε_PA))
+         ℓ = n·(1 − h(Q_obs + μ)) − leak_EC − log2(2/(ε_sec²·ε_cor))
+
+     (TLGR Eq. (2) with preparation quality q = 1; written below as
+     −log2(2/ε_cor) − 2·log2(1/(2·ε_PA)) with ε_PA = ε_sec/2, which is identical.)
 
      ``leak_EC`` is the *measured* Cascade leakage when available (the emulator
      counts every parity bit), else the planning estimate f_EC·n·h(Q). The log
@@ -70,13 +76,16 @@ class FiniteKeyResult:
     eps_cor: float
 
 
-def serfling_mu(n_key: int, n_sample: int, eps_pe: float) -> float:
-    """Serfling fluctuation μ: Q_key ≤ Q_obs + μ except with probability ε_PE."""
+def serfling_mu(n_key: int, n_sample: int, eps_sec: float) -> float:
+    """TLGR Eq. (2) fluctuation μ = sqrt((n+k)/(nk) · (k+1)/k · ln(4/ε_sec)).
+
+    Bounds the key-block error rate from the k-bit sample: Q_key ≤ Q_obs + μ.
+    """
     if n_key <= 0 or n_sample <= 0:
         return 0.5
-    return math.sqrt((n_key + n_sample) * (n_sample + 1)
-                     * math.log(1.0 / eps_pe)
-                     / (2.0 * n_key * n_sample ** 2))
+    return math.sqrt((n_key + n_sample) / (n_key * n_sample)
+                     * (n_sample + 1) / n_sample
+                     * math.log(4.0 / eps_sec))
 
 
 def planned_leak(n_key: int, qber: float, f_ec: float = 1.16) -> float:
@@ -99,8 +108,8 @@ def finite_key_length(n_key: int, n_sample: int, qber: float, leak_ec: float, *,
         eps_cor: correctness failure budget (error-verification hash).
     """
     h = BB84Protocol.binary_entropy
-    eps_pe = eps_pa = eps_sec / 2.0
-    mu = serfling_mu(n_key, n_sample, eps_pe)
+    eps_pa = eps_sec / 2.0
+    mu = serfling_mu(n_key, n_sample, eps_sec)
     q_up = min(0.5, qber + mu)
 
     asymptotic = max(0, int(n_key * (1.0 - h(qber)) - leak_ec))
@@ -108,9 +117,11 @@ def finite_key_length(n_key: int, n_sample: int, qber: float, leak_ec: float, *,
         return FiniteKeyResult(0, asymptotic, qber, q_up, mu, n_key, n_sample,
                                leak_ec, eps_sec, eps_cor)
 
+    # the verification tag really transmitted is ceil(log2(2/eps_cor)) bits
+    # (qne.reconcile.verification_bits) -- charge that, not the real-valued log
     ell = (n_key * (1.0 - h(q_up))
            - leak_ec
-           - math.log2(2.0 / eps_cor)
+           - math.ceil(math.log2(2.0 / eps_cor))
            - 2.0 * math.log2(1.0 / (2.0 * eps_pa)))
     return FiniteKeyResult(
         secret_bits=max(0, math.floor(ell)),

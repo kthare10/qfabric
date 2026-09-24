@@ -319,8 +319,12 @@ class ReliableLink:
         self._rx_thread = threading.Thread(target=self._rx_loop, daemon=True)
         self._rx_thread.start()
 
-    def recv_one(self) -> bytes | None:
-        """Return one delivered message, or ``None`` when the link closes."""
+    def recv_one(self, count: bool = True) -> bytes | None:
+        """Return one delivered message, or ``None`` when the link closes.
+
+        ``count=False``: the RX loop increments ``rx_count`` only after ``on_frame``
+        has queued the message (see listener.Link.recv_one for why).
+        """
         item = self._deliveries.get()
         if item is _STOP:
             if isinstance(self._error, AuthError):
@@ -335,13 +339,14 @@ class ReliableLink:
                 self._error = exc
                 self.close()
                 raise
-        self.rx_count += 1
+        if count:
+            self.rx_count += 1
         return payload
 
     def _rx_loop(self) -> None:
         while self._running:
             try:
-                payload = self.recv_one()
+                payload = self.recv_one(count=False)
             except AuthError as exc:
                 print(f"ReliableLink: authentication failure, closing: {exc}", flush=True)
                 break
@@ -349,6 +354,7 @@ class ReliableLink:
                 break
             if self.on_frame is not None:
                 self.on_frame(payload)
+            self.rx_count += 1          # counted only once it is queued
 
     def send(self, payload: bytes) -> None:
         with self._send_lock:

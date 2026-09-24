@@ -1,5 +1,11 @@
 # QFabric × SeQUeNCe — Distributed Emulator Design
 
+> **Status note (2026-09-21):** this is the June 2026 design draft, kept as the design record.
+> The phase table and "current simplifications" are historical — see [`README.md`](README.md)
+> for what is implemented today (E91, repeater chains, raw-L2 classical link, decoy, Eve, auth,
+> finite-key, key verification) and `../REVIEW_2026-09-21.md` for the latest review.
+
+
 > **Status:** v0.1 design draft (2026-06-27)
 > **Goal:** Run real **SeQUeNCe** node instances as separate processes on separate
 > hosts (FABRIC sites), and have SeQUeNCe's quantum/classical channels carry

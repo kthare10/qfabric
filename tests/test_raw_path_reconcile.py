@@ -30,7 +30,7 @@ from qne.alice import Alice
 from qne.bb84 import AliceRecord, BB84Protocol, BobRecord
 from qne.bob import Bob
 from qne.config import ScenarioConfig
-from qne.reconcile import secure_key_bits
+from qne.reconcile import secure_key_bits, verification_bits
 
 _NEXT_PORT = [57281]
 
@@ -81,8 +81,9 @@ def test_sample_only_disclosure_and_identical_secret():
     key_len = bm.sifted_bits - n_sample
     assert bm.reconciled and am.reconciled
     assert bm.bits_leaked > 0
-    # PA output length follows the shared accounting exactly
-    expected = secure_key_bits(key_len, bm.qber, bm.bits_leaked, True)
+    # PA output length follows the shared accounting exactly, minus the public
+    # key-verification tag (t = ceil(log2(2/eps_cor)) bits)
+    expected = secure_key_bits(key_len, bm.qber, bm.bits_leaked, True) - verification_bits()
     assert bm.secure_key_bits == expected == am.secure_key_bits
     assert expected > 0
     # both sides extracted the identical secret
@@ -122,3 +123,67 @@ def test_no_reconcile_flag_stops_after_qber():
     assert not bob.collector.metrics.reconciled
     assert bob.final_key is None
     assert bob.collector.metrics.qber < 0.05       # sifting itself still ran
+
+
+def test_biased_bases_key_is_z_only_and_all_x_disclosed():
+    """Efficient BB84: every X-X match must be disclosed, key from Z-Z minus the sample."""
+    bias = 0.8
+    alice, bob = _make_pair(n=6000, qber=0.02, seed=19, basis_bias=bias)
+    a_by_seq = {r.sequence_num: r for r in alice.sent_log}
+    b_by_seq = {r.sequence_num: r for r in bob.detection_log}
+    _run(alice, bob)
+    bm = bob.collector.metrics
+    matching = [s for s in b_by_seq if a_by_seq[s].basis == b_by_seq[s].basis]
+    n_x = sum(1 for s in matching if a_by_seq[s].basis == 1)
+    n_z = len(matching) - n_x
+    # disclosed = all X-X + sample_fraction of Z-Z  ->  reported as num_sampled
+    n_sample_z = BB84Protocol.sample_size(n_z, 0.1)
+    assert bm.sifted_bits == len(matching)
+    # key material = Z-Z minus the Z sample; the PA input length is what Cascade saw
+    assert bm.corrections >= 0
+    assert alice.final_key == bob.final_key is not None
+    # the amplified secret cannot exceed the Z-only key length
+    assert bm.secure_key_bits <= n_z - n_sample_z
+
+
+def test_unseeded_runs_produce_different_keys():
+    """Default (seed=None) runs must not be regenerable: two runs -> two keys."""
+    keys = []
+    for _ in range(2):
+        port = _NEXT_PORT[0]
+        _NEXT_PORT[0] += 1
+        cfg = ScenarioConfig(name="unseeded")
+        assert cfg.seed is None and not cfg.reproducible
+        alice = Alice(cfg, bob_host="127.0.0.1", bob_port=port)
+        bob = Bob(cfg, classical_host="127.0.0.1", classical_port=port)
+        n = 3000
+        for seq in range(n):
+            a_basis = int(alice.rng.integers(0, 2))
+            a_bit = int(alice.rng.integers(0, 2))
+            alice.sent_log.append(AliceRecord(seq, a_basis, a_bit))
+            b_basis = int(bob.detector.rng.integers(0, 2))
+            b_bit = a_bit if b_basis == a_basis else int(bob.detector.rng.integers(0, 2))
+            bob.detection_log.append(BobRecord(seq, b_basis, b_bit))
+        _run(alice, bob)
+        assert alice.final_key == bob.final_key is not None
+        keys.append(alice.final_key)
+    assert keys[0] != keys[1]
+
+
+def test_residual_error_is_caught_by_verification(monkeypatch):
+    """If Cascade leaves a residual error, the tag mismatch must abort -- no key."""
+    import qne.reconcile as rc
+    real = rc.reconcile
+
+    def leaky_reconcile(key, oracle, qber, passes=4, seed=0):
+        res = real(key, oracle, qber, passes=passes, seed=seed)
+        res.corrected_key[0] ^= 1          # even-weight residual: parities can't see it
+        res.corrected_key[1] ^= 1
+        return res
+    monkeypatch.setattr(rc, "reconcile", leaky_reconcile)
+    alice, bob = _make_pair(n=3000, qber=0.02, seed=23)
+    _run(alice, bob)
+    assert not bob.collector.metrics.reconciled
+    assert not alice.collector.metrics.reconciled
+    assert bob.final_key is None and alice.final_key is None
+    assert bob.collector.metrics.secure_key_bits == 0

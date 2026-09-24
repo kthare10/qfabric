@@ -35,6 +35,15 @@ from typing import Any
 from qne.auth import FrameAuthenticator
 
 
+
+# Upper bound on one classical frame. Basis lists for 10^6 photons are ~10 MB of
+# JSON; 64 MiB leaves headroom while stopping a hostile length prefix cold.
+MAX_FRAME_BYTES = 64 * 1024 * 1024
+
+
+class ProtocolError(RuntimeError):
+    """The peer sent something the BB84 classical protocol does not allow."""
+
 class ClassicalChannel:
     """TCP-based classical channel for BB84 sifting.
 
@@ -59,10 +68,16 @@ class ClassicalChannel:
         """Receive a length-prefixed JSON message.
 
         Raises qne.auth.AuthError if authentication is on and the frame fails
-        verification (tampering, replay, or key mismatch).
+        verification (tampering, replay, or key mismatch), and ProtocolError if
+        the (unauthenticated) length prefix exceeds MAX_FRAME_BYTES -- the header
+        is outside the MAC, so a peer or MITM could otherwise force a multi-GiB
+        allocation before verification.
         """
         header = self._recv_exact(4)
         length = struct.unpack("!I", header)[0]
+        if length > MAX_FRAME_BYTES:
+            raise ProtocolError(
+                f"frame length {length} exceeds MAX_FRAME_BYTES={MAX_FRAME_BYTES}")
         data = self._recv_exact(length)
         if self._auth is not None:
             data = self._auth.open(data)
@@ -83,13 +98,22 @@ class ClassicalChannel:
 
 
 class ClassicalServer:
-    """TCP server side of the classical channel (Bob)."""
+    """TCP server side of the classical channel (Bob).
+
+    ``accept_timeout`` bounds the wait for Alice (None = forever, the historical
+    behaviour); ``data_timeout`` is applied to the accepted connection so a peer
+    that stalls mid-Cascade raises ``socket.timeout`` instead of hanging Bob.
+    """
 
     def __init__(self, host: str = "0.0.0.0", port: int = 5100,
-                 auth_key: bytes | str | None = None):
+                 auth_key: bytes | str | None = None,
+                 accept_timeout: float | None = None,
+                 data_timeout: float | None = 600.0):
         self.host = host
         self.port = port
         self.auth_key = auth_key
+        self.accept_timeout = accept_timeout
+        self.data_timeout = data_timeout
         self._server_sock: socket.socket | None = None
 
     def start(self) -> None:
@@ -115,12 +139,14 @@ class ClassicalServer:
 
         self._server_sock.bind((self.host, self.port))
         self._server_sock.listen(1)
+        self._server_sock.settimeout(self.accept_timeout)
 
     def accept(self) -> ClassicalChannel:
         """Wait for Alice to connect."""
         if self._server_sock is None:
             raise RuntimeError("Server not started")
         conn, _addr = self._server_sock.accept()
+        conn.settimeout(self.data_timeout)
         return ClassicalChannel(conn, auth_key=self.auth_key)
 
     def close(self) -> None:

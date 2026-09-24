@@ -1,7 +1,7 @@
 # QFabric Concepts — the physics, and exactly where it lives in the code
 
 This document walks through every quantum-networking concept QFabric implements —
-from "what is a qubit" to entanglement swapping over a real WAN — and, for each one,
+from "what is a qubit" to entanglement swapping across real testbed nodes — and, for each one,
 points at the **specific code** that realizes it, the **tests** that prove it, and the
 **notebooks** that let you watch it run.
 
@@ -268,10 +268,6 @@ the tests confirm the chain law holds under this ordering too.
 **See it run:** `test_repeater.py` (herald mapping, chain law, no-correction
 control), `test_three_node_repeater.py` (all of it across processes), notebooks
 `12_repeater` and `12_repeater_fabric`.
-
----
-
-## Part II — From quantum effects to a secret key
 
 ### 7 · The pipeline spine: transmit → sift → estimate → distill
 

@@ -32,8 +32,28 @@ def _send(link, obj: dict) -> None:
     link.send(json.dumps(obj, separators=(",", ":")).encode("utf-8"))
 
 
+_SYNC_TIMEOUT_S = 60.0          # a dead peer must not hang the handshake forever
+
+
 def _recv(link, kind: str) -> dict:
-    raw = link.recv_one()
+    sock = getattr(link, "_sock", None)
+    if sock is not None:
+        try:
+            sock.settimeout(_SYNC_TIMEOUT_S)
+        except OSError:
+            pass
+    try:
+        raw = link.recv_one()
+    except TimeoutError as exc:
+        raise ConnectionError(
+            f"clock sync timed out after {_SYNC_TIMEOUT_S}s awaiting {kind} "
+            "(peer died during startup?)") from exc
+    finally:
+        if sock is not None:
+            try:
+                sock.settimeout(None)      # back to blocking for the protocol
+            except OSError:
+                pass
     if raw is None:
         raise ConnectionError(f"link closed during clock sync (awaiting {kind})")
     msg = json.loads(raw.decode("utf-8"))

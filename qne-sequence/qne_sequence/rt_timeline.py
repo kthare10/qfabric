@@ -123,7 +123,9 @@ class RealTimeTimeline(Timeline):
                     self._cond.wait(timeout=min(wait_s, _MAX_WAIT_S))
                     continue
 
-                # drain everything that is due now
+                # pop ONE due event. Draining the whole due set first would let a
+                # handler's newly scheduled event (possibly earlier than the rest of
+                # the batch) run after them -- observed as timestamps 100, 200, 150.
                 while len(self.events) > 0:
                     nxt = self.events.top()
                     if nxt.time >= self.stop_time:
@@ -134,6 +136,7 @@ class RealTimeTimeline(Timeline):
                     if ev.is_invalid():
                         continue
                     due.append(ev)
+                    break
 
             # Execute outside the lock: handlers schedule new events via inject(),
             # which re-acquires the lock. Keep simulated time monotonic.

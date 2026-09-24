@@ -8,24 +8,25 @@ Legend: ✅ done · 🟡 in progress / partial · ⬜ planned
 
 ## Status at a Glance
 
-QFabric runs **BB84 and entanglement-based QKD (E91/BBM92) end-to-end on a real FABRIC slice** — including a **3-node quantum-repeater chain validated over the live WAN** — with the full key-distillation pipeline (sift → Cascade → Toeplitz privacy amplification), a security-depth stack (finite-key, authenticated channel, live decoy states, biased bases, detector realism), and cross-validation against the SeQUeNCe and NetSquid simulators.
+QFabric runs **BB84 and entanglement-based QKD (E91/BBM92) end-to-end as distributed systems on a FABRIC slice** — including a **3-node entanglement-swapping chain with heralds over a live WAN segment** — with the full key-distillation pipeline (sift → Cascade → key verification → Toeplitz privacy amplification), a security-depth stack (finite-key, authenticated channel, decoy-state accounting, biased bases, detector realism), and cross-validation against the SeQUeNCe and NetSquid simulators. The quantum channel and the quantum states are *statistical models*; the classical/herald traffic is real. See `ASSUMPTIONS.md` and `REVIEW_2026-09-21.md`.
 
 | Capability | Status |
 |------------|--------|
 | Photon wire format (EtherType `0x7101`) + P4 fiber-loss channel (BMv2) | ✅ |
-| Python QNE (Alice, Bob, detector, BB84) + classical TCP channel | ✅ |
+| Python QNE (Alice, Bob, detector, BB84) + classical channel (raw L2 `0x7102` on the distributed path; TCP on the raw-socket path / dev) | ✅ |
 | FABRIC 3-node deployment | ✅ |
 | 4-way cross-validation **on FABRIC nodes** (measured + sim + SeQUeNCe + NetSquid) | ✅ |
 | Full pipeline sift → reconcile (Cascade) → amplify (Toeplitz) on all paths | ✅ |
-| Entanglement (E91/BBM92) distributed over 2 nodes; CHSH > 2 on real hardware | ✅ |
-| **Repeater chain (entanglement swapping) across 3 nodes on the live WAN** | ✅ validated 2026-07-13 |
-| Security depth: finite-key, authenticated channel, live decoy, biased bases, Eve | ✅ |
+| Entanglement (E91/BBM92) distributed over 2 nodes; CHSH > 2 across real links (emulated Werner pairs — not a physical Bell test) | ✅ |
+| **Repeater chain (entanglement swapping) across 3 nodes, heralds on the live WAN** | ✅ 2026-07-13 (the single saved 3-node artifact is a QBER outlier; use the `wan_battery` replicates) |
+| Security depth: finite-key (TLGR constant, reachable on both paths), authenticated channel, key verification after Cascade, decoy-state accounting, biased bases (Z-only key on both paths), intercept-resend Eve | ✅ (2026-09-21 review fixes) |
 | Detector realism (efficiency, dark counts, dead time, timing jitter) | ✅ |
 | Notebook workflow 00–13 (slice workflow + local demos) | ✅ |
 | Docs: `PRIMER.md` (concepts from zero) + `CONCEPTS.md` (concept → code map) | ✅ |
-| **Emulation-fidelity program: lookahead delivery + clock sync (no PTP)** — every classical message delivered at exactly `t_send + delay` in shared clock terms (BB84 timeline path, E91, repeater chains, Cascade); per-run certificate (`lookahead.late_events == 0` ⇒ the run executed the simulator's schedule); unified distance knob (`--channel-delay auto` derives delay from the same L as loss); single-site slice default | ✅ 2026-07-15 |
-| **Both channels as raw L2 through the P4 switch** — classical channel off TCP onto raw EtherType `0x7102` (`--classical-transport l2`) with a reliable-datagram shim (`l2_link.ReliableLink`: seq/ack/timeout-resend/dedup + fragmentation, auth unchanged); P4 gains a `classical_channel_params` table + parser branch; P4 table-miss drop bug fixed; netem relocated to switch egress + matched by ethertype (stress only); interim orchestrator-seeded epoch (`--epoch-ns`) | 🟡 code + loopback/unit tests done 2026-07-15; **live-slice validation + P4 recompile pending** |
-| Tests: 112 core + 93 distributed (incl. 8 L2-shim), physics-validated; ruff-clean CI | ✅ |
+| **Emulation-fidelity program: lookahead delivery + clock sync (no PTP)** — every classical message delivered at exactly `t_send + delay` in shared clock terms (BB84 timeline path, E91, repeater chains, Cascade); per-run certificate (`lookahead.certified` — only meaningful with a nonzero modeled delay; `late_events == 0` alone is vacuous); unified distance knob (`--channel-delay auto` derives delay from the same L as loss); single-site slice default | ✅ 2026-07-15 |
+| **Both channels as raw L2 through the P4 switch** — classical channel off TCP onto raw EtherType `0x7102` (`--classical-transport l2`) with a reliable-datagram shim (`l2_link.ReliableLink`: seq/ack/timeout-resend/dedup + fragmentation, auth unchanged); P4 gains a `classical_channel_params` table + parser branch; P4 table-miss drop bug fixed; netem relocated to switch egress + matched by ethertype (stress only); interim orchestrator-seeded epoch (`--epoch-ns`) | ✅ live on the slice 2026-08-04 (BB84 + E91 runs with `classical_transport: l2`); the BB84 run's lookahead certificate FAILED (22/82 late at 245 µs modeled delay) — a clean certified run at nonzero delay is still to be recorded |
+| **Central time authority (global timeline)** — `qne_sequence.time_authority` + `ConservativeTimeline`: LBTS grants with lookahead = channel delay and in-flight message counting; `late_events == 0` by construction; `node_runner --time-authority`, `run_sequence_bb84(time_authority=True)` starts it on Bob's node | ✅ 2026-09-21/22 — **all three protocols, validated on a live slice.** BB84 (both channels raw L2): 374/376 frames checked, 0 late, certified; wall-clock control 406 late. E91 over raw L2: 220/221 checked, 0 late, certified, CHSH 2.742; wall-clock control 220 late (max 74 ms). Repeater chain on the slice: all 3 processes certified (0 late) vs 90/19/2 late under the wall clock, identical physics (3653 swaps, CHSH 2.616). Two mechanisms — LBTS grants where a node free-runs (BB84's protocol phase), one shared per-node logical clock everywhere else. See `results/timeline_2026-09-21/` |
+| Tests: 139 core + 100 distributed, physics-validated; ruff-clean CI | ✅ |
 
 ---
 
@@ -37,16 +38,18 @@ QFabric runs **BB84 and entanglement-based QKD (E91/BBM92) end-to-end on a real 
   so an unknown-wavelength photon is dropped (default action) instead of being forwarded
   out port 0 by a zero-initialized threshold.
 - ✅ Classical-traffic L2 forwarding (FABRIC OVS MAC workaround).
-- 🟡 **Emulated classical channel in the data plane (2026-07-15):** raw EtherType
-  `0x7102` gets a parser branch + a dedicated `classical_channel_params` table
+- ✅ **Emulated classical channel in the data plane (2026-07-15, live 2026-08-04):** raw
+  EtherType `0x7102` gets a parser branch + a dedicated `classical_channel_params` table
   (classify / forward / MAC-rewrite / count, no loss) — "the switch is the fiber,
-  carrying both wavelengths." Code + table-config done; live-slice recompile/validation
-  pending. Propagation delay stays on netem at the switch egress (BMv2 can't hold a
-  packet) or the model-layer timeline.
+  carrying both wavelengths." Ran on the slice for BB84 and E91 on 2026-08-04.
+  Propagation delay stays on netem at the switch egress (BMv2 can't hold a packet) or
+  the model-layer timeline. Open: the loss table is direction-blind and the counters are
+  never read back (see Known Limitations).
 - ✅ Sweep figures generated locally via `paper/make_figures.py` (QBER + key rate vs distance/attenuation). `paper/` is git-ignored (drafts + regenerable figures), so re-run the script to produce them. Validate measured drop rate vs analytical once a clean FABRIC sweep dataset is recorded.
 - ⬜ **Timing jitter injection** in the data plane and validation against detector specs.
 - ⬜ **Throughput benchmark**: sustainable photon rate / P4 processing overhead.
 - ⬜ Port the model from BMv2 to **Tofino / DPDK SmartNIC** for finer timing control.
+- ✅ **Global timeline (2026-09-21/22):** BB84, E91/BBM92 and the repeater chain all run on it, validated on a live slice. LBTS grants where a node free-runs (BB84's protocol phase); one shared per-node logical clock everywhere else (a station serves both its links off it). `run_sequence_e91` also gained the `--channel-delay` it never passed, so E91 slice runs no longer certify vacuously at delay 0. Optional next: wall-clock pacing (`time_scale`) on top of the grants for demos.
 
 ## Phase 2 — Quantum Node Emulator ✅ (core)
 
@@ -109,6 +112,8 @@ and the netem cost-measurement datasets).
 
 ---
 
+---
+
 ## Protocol Backlog
 
 Priority order from the research plan:
@@ -116,7 +121,7 @@ Priority order from the research plan:
 | Protocol | Status | Notes |
 |----------|--------|-------|
 | **BB84 QKD** | ✅ | Prepare-and-measure baseline (`qne/`, `qne-sequence/`) |
-| **Decoy-state BB84** | ✅ | PNS-resilient key rate (`qne/decoy.py`): weak-coherent Poisson source, 3 intensities, full Ma–Qi–Zhao–Lo Y1/e1 bounds → GLLP secure key rate; sweep + figure via `scripts/decoy_sweep.py`. **Runs on the live transport** (`node_runner --decoy`: real per-pulse photon numbers, measured per-intensity gains/QBERs feed the analysis); TCP transport only — the raw 0x7101 frame has no photon-count field yet. |
+| **Decoy-state BB84** | 🟡 | PNS-*aware* key-rate accounting (no PNS adversary is modeled; the bounds are asserted, not attacked) (`qne/decoy.py`): weak-coherent Poisson source, 3 intensities, full Ma–Qi–Zhao–Lo Y1/e1 bounds → GLLP secure key rate; sweep + figure via `scripts/decoy_sweep.py`. **Runs on the live transport** (`node_runner --decoy`: real per-pulse photon numbers, measured per-intensity gains/QBERs feed the analysis); TCP transport only — the raw 0x7101 frame has no photon-count field yet. |
 | **E91 / BBM92 QKD** | ✅ | Entanglement-based QKD on the shared quantum-state service (`qne-sequence/qstate_core.py`, `e91.py`), running **distributed over 2 nodes** (`distributed_e91.py`, `remote_qm.py`; `--protocol e91\|bbm92`). Werner-state model ties QBER=(1−F)/2 and CHSH S=2√2·F; Bell-test coordination + basis/sample disclosure ride the real link; sift/QBER reuse `BB84Protocol`. |
 | **Entanglement swapping** (repeaters) | ✅ (3-node) | BSM swap op + heralded correction validated in-process (`repeater.py`), across 3 processes (`distributed_repeater.py`), and **on a live FABRIC slice (2026-07-13)** — identical keys over a swapped chain with heralds on a real WAN segment. n-node chains (>1 station) are next. |
 | **Quantum teleportation** | ⬜ | Stretch goal; classical bits per teleport |
@@ -137,11 +142,16 @@ Priority order from the research plan:
 
 ## Known Limitations (today)
 
+*(Updated by the 2026-09-21 review — see `REVIEW_2026-09-21.md` for what was fixed.)*
+
 - The `qne/` hand-coded path models photons at the bit/basis level (no entanglement). Entanglement (E91/BBM92 + the repeater chain) lives in `qne-sequence/` on a shared multi-qubit **quantum-state service**: 2-node E91 and the 3-node swapped chain both run distributed and are validated on real FABRIC hardware. Chains with more than one repeater station (n-node) are the next extension.
 - QBER comes from a depolarizing polarization-misalignment model (≈ (1−F)/2) plus dark counts; `dead_time` and `timing_jitter` are now modeled in the detector (dead-time gating needs a pulse period / arrival times).
 - Adversary model available for the BB84 path (`qne/eve.py`, intercept-resend, `--eve-fraction`) — measured QBER then reflects channel noise **plus** eavesdropping. A beam-splitting / PNS Eve and an Eve-on-E91 path are still open (see Phase 2b).
 - Security accounting: asymptotic Shor–Preskill by default, **finite-key** (Serfling + TLGR-style length) with `--finite-key`; classical channel can be **HMAC-authenticated** with `--auth-key` (computational MAC standing in for Wegman–Carter; unauthenticated remains the default). Cascade + Toeplitz PA run on all three paths (distributed BB84, E91, raw-socket `qne/`) — both sides extract an identical secret key.
-- Decoy-state runs live on the TCP transport only; the raw 0x7101 frame has no photon-count field yet (per-photon thinning happens at the source).
+- Decoy-state runs live on the TCP-descriptor transport only, with per-photon fiber thinning at the source (`loss_where = none`) — the P4 switch is **bypassed**. The raw 0x7101 frame has no photon-count field yet. **Decoy has never run through the emulated fiber**, and there is no PNS Eve; treat decoy as source-realism + honest accounting.
+- P4 loss table is direction-blind (keyed on wavelength only; the single entry hard-codes egress port 1) — fine while photons flow Alice→Bob only. P4 counters are never read back, so the switch's own drop count has not been compared with the table threshold on a live run.
+- Cross-validation backends do not share every assumption: the SeQUeNCe adapter ignores `num_photons`/`sample_fraction` and uses a weak-coherent μ = 0.1 source; `detection_window` is not a scenario field.
+- The 2026-07-03 `all_scenarios.json` sweep is **stale** (frozen switch loss); the sweep runner is fixed but no measured distance curve has been re-recorded yet.
 - Memoryless per-packet loss — no burst loss or correlated fading.
 - Single wavelength, single link per run.
 - P4 and Python RNGs are independent — reproducibility holds within a backend, not bit-for-bit across the P4 and Python paths.

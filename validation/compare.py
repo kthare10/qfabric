@@ -148,23 +148,13 @@ def run_backend_on_node(node, venv_python: str, module: str, platform: str,
     return _result_from_stdout(stdout, stderr, "n/a", platform, scenario_name)
 
 
-def qber_tolerance(qber: float, n_sifted: int, num_sigma: float = 2.0) -> float:
-    """Compute statistical tolerance for QBER comparison.
-
-    Returns the tolerance: num_sigma * sqrt(QBER * (1-QBER) / N)
-    """
-    if n_sifted == 0:
-        return float("inf")
-    return num_sigma * math.sqrt(max(qber * (1 - qber), 1e-10) / n_sifted)
-
-
 def compare_results(
     results: list[ValidationResult],
     num_sigma: float = 2.0,
 ) -> dict:
     """Compare results across platforms.
 
-    Returns a dict with comparison details and pass/fail for each pair.
+    Returns comparison details and pass/fail for each pair. No pairs is inconclusive.
     """
     comparisons = []
 
@@ -197,7 +187,12 @@ def compare_results(
                 "sifted_b": res_b.sifted_bits,
             })
 
-    return {"comparisons": comparisons, "all_passed": all(c["passed"] for c in comparisons)}
+    inconclusive = len(comparisons) == 0
+    return {
+        "comparisons": comparisons,
+        "inconclusive": inconclusive,
+        "all_passed": not inconclusive and all(c["passed"] for c in comparisons),
+    }
 
 
 def backend_status(result: ValidationResult) -> tuple[str, str]:
@@ -353,8 +348,10 @@ def plot_sweep_comparison(
         for r in results:
             platforms.add(r.platform)
 
-    colors = {"qfabric": "blue", "sequence": "red", "netsquid": "green", "qfabric_bmv2": "purple"}
-    markers = {"qfabric": "o", "sequence": "s", "netsquid": "^", "qfabric_bmv2": "D"}
+    colors = {"qfabric": "blue", "sequence": "red", "netsquid": "green",
+              "qfabric_bmv2": "purple", "qfabric_sim": "orange"}
+    markers = {"qfabric": "o", "sequence": "s", "netsquid": "^",
+               "qfabric_bmv2": "D", "qfabric_sim": "v"}
 
     def _xval(name: str) -> float:
         """Numeric x for a scenario. Sweep names are '<param>=<value>'."""
@@ -424,8 +421,9 @@ def main():
         plot_idx = sys.argv.index("--plot")
         if plot_idx + 1 < len(sys.argv):
             plot_output = sys.argv[plot_idx + 1]
-    # --strict: INCONCLUSIVE (zero backend pairs compared) is also a failure,
-    # for environments where cross-validation is expected to actually run.
+    # --strict: INCONCLUSIVE (zero backend pairs) is also a failure. Without it an
+    # environment with a single backend (e.g. the core CI job) reports INCONCLUSIVE
+    # and exits 0 -- never a false PASS, but not a failure either.
     strict = "--strict" in sys.argv
     any_failed = False
     total_comparisons = 0
@@ -441,17 +439,21 @@ def main():
 
             ok_results = print_backend_summary(results)
             comp = compare_results(ok_results)
-            if not comp["comparisons"]:
-                print("  (no backend pair to compare)")
+            if comp["inconclusive"]:
+                print("  [INCONCLUSIVE] no backend pair to compare")
             total_comparisons += len(comp["comparisons"])
-            if not comp["all_passed"]:
-                any_failed = True
+            if comp["comparisons"] and not comp["all_passed"]:
+                any_failed = True     # inconclusive is NOT a failure unless --strict
             for c in comp["comparisons"]:
                 status = "PASS" if c["passed"] else "FAIL"
                 print(
                     f"  [{status}] {c['platform_a']} vs {c['platform_b']}: "
                     f"ΔQBER={c['delta_qber']:.4f} (tol={c['tolerance']:.4f})"
                 )
+
+        if total_comparisons == 0:
+            print("\nOverall: INCONCLUSIVE (no cross-validation performed)")
+            any_failed = True
 
         if plot_output:
             # Determine sweep parameter from filename
@@ -471,8 +473,8 @@ def main():
         if not comp["comparisons"]:
             print("  (need at least 2 backends with data to cross-validate)")
         total_comparisons += len(comp["comparisons"])
-        if not comp["all_passed"]:
-            any_failed = True
+        if comp["comparisons"] and not comp["all_passed"]:
+            any_failed = True         # inconclusive is NOT a failure unless --strict
         for c in comp["comparisons"]:
             status = "PASS" if c["passed"] else "FAIL"
             print(
@@ -486,10 +488,10 @@ def main():
             all_pass = comp["all_passed"]
             print(f"\nOverall: {'ALL PASSED' if all_pass else 'SOME FAILED'}")
 
-    if any_failed:
-        sys.exit(1)
     if strict and total_comparisons == 0:
         print("--strict: INCONCLUSIVE treated as failure")
+        sys.exit(1)
+    if any_failed:
         sys.exit(1)
 
 

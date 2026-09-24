@@ -11,9 +11,11 @@ from __future__ import annotations
 
 from qne.reconcile import (          # noqa: F401  (re-export)
     bits_to_int,
+    KeyVerificationError,
     drive_cascade,
     secure_key_bits,
     serve_parities,
 )
 
-__all__ = ["bits_to_int", "drive_cascade", "secure_key_bits", "serve_parities"]
+__all__ = ["KeyVerificationError", "bits_to_int", "drive_cascade", "secure_key_bits",
+           "serve_parities"]

@@ -33,7 +33,9 @@ from qne.channel import ClassicalClient
 from qne.config import ScenarioConfig
 from qne.metrics import MetricsCollector
 from qne.photon import PhotonPacket
-from qne.reconcile import ChannelRpc, bits_to_int, serve_parities
+from qne.channel import ProtocolError
+from qne.reconcile import (ChannelRpc, KeyVerificationError, bits_to_int,
+                           serve_parities)
 
 
 class Alice:
@@ -61,6 +63,8 @@ class Alice:
         self.bob_host = bob_host
         self.bob_port = bob_port
         self.auth_key = auth_key
+        # Unseeded by default (OS entropy): the key material must not be
+        # regenerable from the scenario file. See ScenarioConfig.seed.
         self.rng = np.random.default_rng(config.seed)
         self.sent_log: list[AliceRecord] = []
         self.final_key: int | None = None    # extracted secret (post Cascade + PA)
@@ -171,7 +175,8 @@ class Alice:
 
             # Receive sifting result from Bob
             msg = channel.recv_message()
-            assert msg["type"] == "sifting_result"
+            if msg.get("type") != "sifting_result":
+                raise ProtocolError(f"expected sifting_result, got {msg.get('type')!r}")
 
             matching_seqs = msg["matching_indices"]
             bob_detected_seqs = set(msg["detected_sequences"])
@@ -191,7 +196,8 @@ class Alice:
 
             # Receive QBER estimate from Bob
             qber_msg = channel.recv_message()
-            assert qber_msg["type"] == "qber_result"
+            if qber_msg.get("type") != "qber_result":
+                raise ProtocolError(f"expected qber_result, got {qber_msg.get('type')!r}")
 
             # Key = sifted minus disclosed, in the shared sorted order; serve
             # Cascade parities over it if Bob decided the run is reconcilable.
@@ -202,9 +208,16 @@ class Alice:
             corrections = bits_leaked = 0
             final = key_bits
             if qber_msg.get("reconcile"):
-                final, corrections, bits_leaked = serve_parities(
-                    ChannelRpc(channel), key_bits)
-                reconciled = True
+                try:
+                    final, corrections, bits_leaked = serve_parities(
+                        ChannelRpc(channel), key_bits)
+                    reconciled = True
+                except KeyVerificationError as e:
+                    # Cascade left a residual error: the keys differ and NO key
+                    # is output (correctness failure, reported not hidden).
+                    corrections, bits_leaked = e.corrections, e.bits_leaked
+                    final, reconciled = [], False
+                    print(f"Alice: key verification FAILED after Cascade ({e})")
             self.final_key = bits_to_int(final) if reconciled else None
 
             self.collector.record_received(len(bob_detected_seqs))

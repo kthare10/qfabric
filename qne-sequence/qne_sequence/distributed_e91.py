@@ -22,10 +22,11 @@ import numpy as np
 
 from qne.bb84 import BB84Protocol
 from .quantum_state_service import QuantumStateService
-from .remote_qm import RpcChannel, RemoteQuantumManager
-from .reconcile_link import bits_to_int, drive_cascade, serve_parities
+from .remote_qm import LogicalClock, RpcChannel, RemoteQuantumManager
+from .reconcile_link import (KeyVerificationError, bits_to_int, drive_cascade,
+                             serve_parities)
 from .e91 import _ANGLE, _MODES, _CHSH, chsh_value
-from .listener import Link
+from .listener import Link, lookahead_report
 
 
 def _key_positions(a_codes, b_codes, surviving, key_codes):
@@ -45,13 +46,20 @@ def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
                  channel_delay: int = 0, classical_transport: str = "tcp",
                  classical_iface: str | None = None,
                  src_mac: str | None = None,
-                 dst_mac: str | None = None) -> dict:
+                 dst_mac: str | None = None,
+                 logical_clock: bool = False) -> dict:
     """Run one side of a distributed E91/BBM92 session; return the result dict.
 
-    ``channel_delay`` (ps) turns on lookahead pacing: every classical message
-    is delivered at exactly t_send + delay in shared clock terms (see
-    RpcChannel), so the run reproduces a simulator's message timing as long
-    as real latency stays under the modeled delay.
+    ``channel_delay`` (ps) turns on lookahead pacing: every classical message is
+    delivered at exactly t_send + delay in shared clock terms (see RpcChannel).
+
+    ``logical_clock`` puts the run on the **global timeline**: timestamps are
+    simulation time and the receiver's clock jumps to the arrival time, so nothing
+    sleeps and nothing can be late whatever the wire does. E91 needs no LBTS grants
+    from the time authority, unlike BB84's protocol phase: every action here is
+    gated by a blocking receive (Alice: PLAN -> MEASURE_REQ -> RECONCILE -> serve
+    parities; Bob the mirror image), so the two sides strictly alternate and the
+    message order *is* the schedule. The result reports ``sim_elapsed_ps``.
     """
     spec = _MODES[mode]
     key_codes = set(spec["key"])
@@ -69,7 +77,9 @@ def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
         link.connect(host, port)
     from .timesync import sync_link
     peer_offset_ns, rtt_ns = sync_link(link, serving=(role == 1))
-    rpc = RpcChannel(link, delay_ps=channel_delay, peer_offset_ns=peer_offset_ns)
+    clock = LogicalClock() if logical_clock else None
+    rpc = RpcChannel(link, delay_ps=channel_delay, peer_offset_ns=peer_offset_ns,
+                     clock=clock)
     link.start_rx()
 
     try:
@@ -85,16 +95,26 @@ def run_e91_node(role: int, name: str, peer: str, host: str, port: int, *,
         link.close()
 
     result.update({"role": role, "name": name, "mode": mode,
+                   "timeline": ("logical" if logical_clock else "wall-clock"),
+                   # simulation time the session consumed (logical mode): every
+                   # message costs exactly one channel_delay
+                   "sim_elapsed_ps": rpc.sim_elapsed_ps,
                    "quantum_transport": "entangled-state-service",
                    "classical_transport": classical_transport,
                    "tx_frames": link.tx_count, "rx_frames": link.rx_count,
                    "authenticated": auth_key is not None,
                    "auth_failures": link.auth_failures,
+                   # raw 0x7102 frames dropped as truncated in flight (0 on TCP)
+                   "short_frames": link.short_frames,
                    "channel_delay_ps": channel_delay,
                    "timesync": {"offset_ns": peer_offset_ns, "rtt_ns": rtt_ns},
-                   "lookahead": {"on_time_events": rpc.on_time_events,
-                                 "late_events": rpc.late_events,
-                                 "max_lateness_ps": rpc.max_lateness_ns * 1000}})
+                   "lookahead": lookahead_report(rpc.on_time_events, rpc.late_events,
+                                                 rpc.max_lateness_ns * 1000,
+                                                 channel_delay),
+                   # the ``fidelity`` knob is the Werner weight w; the Bell-state
+                   # fidelity <Phi+|rho|Phi+> = (3w+1)/4 is what an experiment quotes
+                   "werner_w": fidelity,
+                   "bell_fidelity": (3.0 * fidelity + 1.0) / 4.0})
     return result
 
 
@@ -156,11 +176,15 @@ def _run_alice(rpc, spec, key_codes, num_pairs, fidelity, loss_probability,
     corrections = bits_leaked = 0
     secure_len = 0
     if do_reconcile and key_only and secure_fraction > 0:   # abort above ~11% QBER
-        final, corrections, bits_leaked = serve_parities(
-            rpc, [a_bits[i] for i in key_only])
-        alice_key = bits_to_int(final)                       # extracted secret key
-        secure_len = len(final)
-        reconciled = True
+        try:
+            final, corrections, bits_leaked = serve_parities(
+                rpc, [a_bits[i] for i in key_only])
+            alice_key = bits_to_int(final)                   # extracted secret key
+            secure_len = len(final)
+            reconciled = True
+        except KeyVerificationError as e:                    # residual error: no key
+            corrections, bits_leaked = e.corrections, e.bits_leaked
+            alice_key = None
 
     finite_info = None
     if fk_eps is not None and reconciled:
@@ -231,11 +255,15 @@ def _run_bob(rpc, spec, key_codes, num_pairs, mode, sample_fraction, seed,
     if do_reconcile and key_only and summary["secure_fraction"] > 0:  # abort above ~11% QBER
         finite = ({"n_sample": summary["num_sampled"], **fk_eps}
                   if fk_eps is not None else None)
-        key_arr, corrections, bits_leaked = drive_cascade(
-            rpc, key_arr, summary["qber"], seed + 303, passes=cascade_passes,
-            finite=finite)
-        secure_len = len(key_arr)
-        reconciled = True
+        try:
+            key_arr, corrections, bits_leaked = drive_cascade(
+                rpc, key_arr, summary["qber"], seed + 303, passes=cascade_passes,
+                finite=finite)
+            secure_len = len(key_arr)
+            reconciled = True
+        except KeyVerificationError as e:                    # residual error: no key
+            corrections, bits_leaked = e.corrections, e.bits_leaked
+            key_arr = []
 
     finite_info = None
     if fk_eps is not None and reconciled:

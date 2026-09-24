@@ -96,7 +96,61 @@ Consequences for QFabric:
   TCP remains available (`--classical-transport tcp`) for local/dev and is the transport of
   the control plane. `AF_PACKET` (raw L2) is Linux/slice-only.
 
-## Timing (revised 2026-07-15 — lookahead delivery, no PTP)
+## Timing (revised 2026-09-21 — central time authority; lookahead delivery kept as the wall-clock mode)
+
+**The global timeline is now a real option, not a plan**, and it covers every protocol:
+BB84, E91/BBM92 and the entanglement-swapping chain. `node_runner --time-authority`
+(or `time_authority=True` on the `deploy_fabric.run_sequence_*` helpers) puts a run on
+it. Simulation time is **decoupled from the wall clock**, and the contract is the same
+everywhere: *every classical message is delivered at exactly `t_send + delay` in
+simulation time, so nothing can be late whatever the wire does.*
+
+Two mechanisms enforce that contract, and which one a protocol needs depends on a
+single question — **can a node execute work without waiting for a message?**
+
+| | needs | why |
+|---|---|---|
+| BB84 protocol phase | **LBTS grants** from the central authority (`time_authority.py`) | Alice free-runs on a local event queue (photon emission, detector events), so something must bound how far she may advance |
+| BB84 post-processing, E91/BBM92, repeater chain | **shared logical clock only** (`LogicalClock` in `remote_qm.py`) — no coordinator process | every action waits on a receive, so the message order *is* the schedule; the receiver's clock jumps to the arrival time |
+
+A node owns **one** clock, shared by all its links: a repeater station serving two links,
+or Alice serving K+1, is a single sequential entity and cannot be at two simulation times
+at once. Serving several inbound links therefore advances one monotonic clock — the node
+is modelled as a sequential server with zero service time, and its fixed serve order
+keeps the run deterministic regardless of which request physically arrived first.
+
+The grant mechanism, in one paragraph: Each node keeps its local event queue but may only
+execute events with timestamps up to the last *grant*. The authority computes the grant
+as the lower bound on any timestamp that can still be produced,
+`LBTS = min_i (next_event_i + lookahead_i)`, with `lookahead_i` = the modeled one-way
+channel delay of node *i*'s links (a node whose next event is at *T* cannot make anything
+arrive before *T + delay*), and only issues it when Σsent = Σrecv over all emulated
+classical messages (nothing in flight; links count a message as received only after it
+is queued). Consequently **no node can process an event past the arrival time of a
+message it has not yet received**: `late_events` is zero *by construction*, at any
+wall-clock speed, on any network — the run is an exact distributed execution of the
+sequential simulator's schedule. `tests/test_time_authority.py` shows BB84, E91 and the
+3-process repeater chain all certified at a modeled delay far below real message latency,
+and the wall-clock timeline failing the identical runs with identical physics; the same
+contrast holds on a live slice (`results/timeline_2026-09-21/`).
+**Read the certificate with its coverage:** `on_time_events + late_events` is how many
+frames were actually checked; on the slice run above that is 374 of 374, i.e. the whole
+run. Two mechanisms enforce the same contract: the protocol timeline phase is paced by
+LBTS grants, and the post-processing (Cascade + PA) phase — a strict request/response
+ping-pong, where the message order *is* the schedule — is paced on a **logical clock**,
+the receiver's clock jumping to `t_send + delay` on arrival. Local computation is
+modelled as instantaneous in both, as the timeline already models its handlers, so a
+Cascade of N round trips costs `N·2·delay` of simulation time, reported as
+`postprocess_sim_ps`: reconciliation latency as a modeled quantity rather than a
+property of the wire.
+Cost: one authority round-trip per "how far may I advance" question (control plane,
+TCP); wall-clock realism (delay pacing) is no longer implied — the emulation runs as
+fast as the slowest node. The raw `0x7101` photon path is lossy and therefore not
+message-counted; Bob's runner covers it with a wall-clock quiescence guard (no photon
+frame for `--photon-drain-ms`) before executing events. Scope today: the BB84 path;
+E91 and repeater runs still use the wall-clock timeline below.
+
+### Wall-clock mode (the default; revised 2026-07-15 — lookahead delivery, no PTP)
 
 - `RealTimeTimeline` maps simulation time to wall-clock via a **shared epoch + the OS
   clock** (`time_ns()`), so events fire at `epoch + T·time_scale` and channel delays line
@@ -123,8 +177,11 @@ Consequences for QFabric:
   long as real wire latency stays below `delay × time_scale`, the emulation executes the
   simulator's exact event schedule. Frames that miss their deadline fire immediately and
   are **counted** (`lookahead.late_events` / `max_lateness_ps` in every run's results) —
-  fidelity is verified per run, not assumed. `late_events == 0` is the certificate that
-  the run was, event-for-event, a distributed execution of the simulation.
+  fidelity is verified per run, not assumed. The certificate is `lookahead.certified`:
+  True only when a nonzero delay was modeled, at least one frame was checked against its
+  deadline, and none missed. With `channel_delay = 0` nothing is checked and the field is
+  `None` / `applicable: false` — a bare `late_events == 0` is *not* a pass. (The 2026-08-04
+  BB84 L2 slice run was **not** certified: 22 of 82 frames were late.)
 - **Causality floor:** the modeled delay must exceed the stack's real per-frame latency
   (Python decode + thread wakeup ≈ tens of µs on loopback, plus the wire across hosts).
   Below that — e.g. a 2 km fiber's 9.8 µs — deadlines are honestly reported as late;
@@ -139,6 +196,27 @@ Consequences for QFabric:
   therefore require software loss (`--loss model`, seeded); the P4 path is validated
   statistically.
 
+## Detector and security accounting (revised 2026-09-21)
+
+- **Dark counts fire in every slot**, including slots whose photon was lost in the channel
+  (`qne/bob.py` draws them for unseen sequence numbers; the NetSquid adapter and the
+  distributed BB84 do the same). `dark_count_prob = dark_count_rate × detection_window`
+  with `detection_window` a scenario knob (default 1 ns). At the default 10 Hz this is
+  ~1e-8 per slot — effectively zero; raise the rate or the window to study the
+  dark-count-dominated regime.
+- **Randomness.** `ScenarioConfig.seed` defaults to `None`: bits, bases and QBER samples
+  come from OS entropy. A seeded run is reproducible *and therefore not secret*; use seeds
+  for cross-validation and tests only.
+- **Key verification.** Every reconciled run ends with a `t = ceil(log2(2/ε_cor))`-bit
+  2-universal (Toeplitz) tag of the corrected key; a mismatch aborts with no key on either
+  side. In asymptotic mode the `t` public bits are subtracted from the PA output; in
+  finite-key mode the `log2(2/ε_cor)` term already pays for them.
+- **Finite-key constant.** `μ = sqrt((n+k)/(nk)·(k+1)/k·ln(4/ε_sec))`, TLGR Eq. (2)
+  (arXiv:1103.4130). It is deliberately the published, conservative constant: a 6 k-pulse
+  block yields zero finite-key bits, and that is the honest answer.
+- **Efficient BB84.** With `basis_bias ≠ 0.5` the key is Z–Z matches only; every X–X match
+  is disclosed for the phase-error estimate (both paths).
+
 ## Consistency across implementations (for cross-validation)
 
 Cross-validation only means something if every backend runs under the **same physical
@@ -148,7 +226,9 @@ assumptions** — this was a specific point from the 2026-07-14 review. In parti
   NetSquid, the distributed path, and the P4 path. They use different mechanisms
   (software Bernoulli drop vs the P4 threshold vs each simulator's own loss model), so
   verify they produce matched detection/sift counts, not just matched QBER.
-- **Detector assumptions (η, dark counts) must match** — otherwise the low-signal
+- **Detector assumptions (η, dark counts, detection window) must match** — today the SeQUeNCe
+  adapter ignores `num_photons`/`sample_fraction` and uses a weak-coherent μ = 0.1 source,
+  and `detection_window` is not a `ValidationScenario` field (open item). Otherwise the low-signal
   (high-loss / long-distance) QBER diverges, which is exactly what was observed (the P4
   path running hot at high loss). When comparing, either match dark-count rates or
   compare only in regimes where dark counts are negligible.
