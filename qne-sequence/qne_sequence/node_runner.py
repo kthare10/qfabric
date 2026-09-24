@@ -432,12 +432,29 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Run one distributed SeQUeNCe QKD node.")
     ap.add_argument("--role", required=True, choices=[*_ROLES, "repeater"])
-    ap.add_argument("--protocol", choices=["bb84", "e91", "bbm92", "repeater"],
+    ap.add_argument("--protocol", choices=["bb84", "e91", "bbm92", "repeater", "dqc"],
                     default="bb84",
                     help="bb84=prepare-and-measure; e91/bbm92=entanglement-based "
                          "(shared quantum-state service; alice hosts the register); "
                          "repeater=3-process entanglement-swapping chain "
-                         "(alice=source/register, repeater=swap+herald, bob=far end)")
+                         "(alice=source/register, repeater=swap+herald, bob=far end); "
+                         "dqc=distributed computing (alice=control/register, "
+                         "bob=target; spends pairs on a gate instead of a key)")
+    ap.add_argument("--dqc-primitive", choices=["telegate", "teleport"],
+                    default="telegate",
+                    help="dqc protocol: telegate=non-local CNOT (control stays put, "
+                         "1 bit each way); teleport=state transfer (2 bits A->B)")
+    ap.add_argument("--num-gates", type=int, default=2000,
+                    help="dqc protocol: distributed gates per Pauli channel "
+                         "(the run measures both, so it spends 2x this many pairs)")
+    ap.add_argument("--dqc-drop", choices=["m1", "m2"], default=None,
+                    help="dqc protocol: withhold a correction bit on the wire "
+                         "permanently (control run: costs 50%% on the one Pauli "
+                         "channel that bit protects)")
+    ap.add_argument("--dqc-late", choices=["m1", "m2"], default=None,
+                    help="dqc protocol: withhold a correction bit for the gate, "
+                         "then fold it into the outcome (tracked Pauli frame: the "
+                         "result comes back clean, so latency costs memory time)")
     ap.add_argument("--num-pairs", type=int, default=20000,
                     help="entanglement protocols: Bell pairs to generate")
     ap.add_argument("--chain-mode", choices=["bbm92", "e91"], default="bbm92",
@@ -589,6 +606,8 @@ def main(argv=None) -> int:
 
     if args.role == "repeater" and args.protocol != "repeater":
         ap.error("--role repeater requires --protocol repeater")
+    if args.dqc_drop and args.dqc_late:
+        ap.error("a correction bit is either dropped or late, not both")
     if args.protocol != "repeater" and not args.peer:
         ap.error("--peer is required for the two-party protocols")
 
@@ -623,6 +642,25 @@ def main(argv=None) -> int:
             # the chain never free-runs, so the global timeline needs only the
             # shared logical clock here -- no coordinator process
             logical_clock=bool(args.time_authority))
+        print(json.dumps(result))
+        return 0
+
+    if args.protocol == "dqc":
+        from .distributed_dqc import run_dqc_node
+        loss_p = (0.0 if args.loss == "none"
+                  else loss_probability(args.distance_km, args.attenuation))
+        result = run_dqc_node(
+            _ROLES[args.role], args.name, args.peer, args.host, args.port,
+            num_gates=args.num_gates, primitive=args.dqc_primitive,
+            fidelity=args.fidelity, loss_probability=loss_p, seed=args.seed,
+            auth_key=args.auth_key, channel_delay=channel_delay,
+            classical_transport=args.classical_transport,
+            classical_iface=args.classical_iface,
+            src_mac=args.src_mac, dst_mac=args.dst_mac,
+            # like the repeater chain, dqc never free-runs: every step is gated by
+            # a blocking receive, so the global timeline needs only the shared clock
+            logical_clock=bool(args.time_authority),
+            dropped=args.dqc_drop, late=args.dqc_late)
         print(json.dumps(result))
         return 0
 

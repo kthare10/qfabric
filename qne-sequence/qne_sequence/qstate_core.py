@@ -155,6 +155,68 @@ class QStateRegister:
         m2 = self.measure(q2, 0.0, samp=samp2)
         return m1, m2
 
+    # -- general gates (distributed-computing support) --------------------------
+
+    def alloc(self, amp: np.ndarray | None = None) -> int:
+        """Allocate one fresh qubit — |0> by default, or in the given 2-amplitude state.
+
+        Bell pairs are the *network's* qubits; this is how a node allocates a local
+        **data** qubit for a computation (ROADMAP Phase 6). Returns its qubit id.
+        """
+        vec = np.array([1, 0], dtype=complex) if amp is None else np.asarray(amp, dtype=complex)
+        if vec.shape != (2,):
+            raise ValueError("a single-qubit state needs exactly 2 amplitudes")
+        norm = np.linalg.norm(vec)
+        if norm == 0:
+            raise ValueError("state vector must be non-zero")
+        q = self._next_id
+        self._next_id += 1
+        self._groups[q] = _Group([q], vec / norm)
+        return q
+
+    def apply_gate(self, qubit_ids: list[int], matrix: np.ndarray) -> None:
+        """Apply a 2x2 (one-qubit) or 4x4 (two-qubit) unitary to register qubits.
+
+        ``qubit_ids`` is ordered: for a 4x4 matrix over the basis |00>,|01>,|10>,|11>,
+        ``qubit_ids[0]`` is the most-significant qubit (the control, for ``_CNOT``).
+        Two-qubit gates merge the operands' groups, which is what entangles a local
+        data qubit with a network-supplied Bell half.
+        """
+        u = np.asarray(matrix, dtype=complex)
+        for q in qubit_ids:
+            if q not in self._groups:
+                raise KeyError(f"unknown/at-rest qubit id {q}")
+        if len(qubit_ids) == 1:
+            if u.shape != (2, 2):
+                raise ValueError("a one-qubit gate needs a 2x2 matrix")
+            g = self._groups[qubit_ids[0]]
+            g.amp = self._apply_1q(g.amp, u, g.ids.index(qubit_ids[0]), len(g.ids))
+        elif len(qubit_ids) == 2:
+            if u.shape != (4, 4):
+                raise ValueError("a two-qubit gate needs a 4x4 matrix")
+            q1, q2 = qubit_ids
+            if q1 == q2:
+                raise ValueError("a two-qubit gate needs two distinct qubits")
+            g = self._merge(q1, q2)
+            n = len(g.ids)
+            g.amp = self._apply_2q(g.amp, u, g.ids.index(q1), g.ids.index(q2), n)
+        else:
+            raise ValueError("apply_gate supports one- or two-qubit gates only")
+
+    def statevector(self, qubit_ids: list[int]) -> np.ndarray:
+        """Joint amplitudes of ``qubit_ids`` (which must share one group), MSB first.
+
+        For validation only — no physical node can read this out.
+        """
+        g = self._groups[qubit_ids[0]]
+        if any(self._groups.get(q) is not g for q in qubit_ids):
+            raise ValueError("qubits are not in a single joint state")
+        if sorted(g.ids) != sorted(qubit_ids):
+            raise ValueError("group holds qubits beyond the ones requested")
+        order = [g.ids.index(q) for q in qubit_ids]
+        t = g.amp.reshape([2] * len(g.ids))
+        return np.transpose(t, order).reshape(-1)
+
     # -- measurement -----------------------------------------------------------
 
     def measure(self, qubit_id: int, angle: float, samp: float | None = None) -> int:

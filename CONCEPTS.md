@@ -269,6 +269,78 @@ the tests confirm the chain law holds under this ordering too.
 control), `test_three_node_repeater.py` (all of it across processes), notebooks
 `12_repeater` and `12_repeater_fabric`.
 
+#### 6.1 · From swapping to *computing* — teleportation and the non-local CNOT
+
+**Concept.** The same machinery buys something other than a key. Two QPUs at
+different sites share no qubit, so no gate between them is possible — unless they
+spend entanglement. Two ways to spend it:
+
+- **Teleport** (state transfer). BSM the data qubit against your half of a pair,
+  send the 2 herald bits, the peer applies X<sup>m₂</sup>Z<sup>m₁</sup> — and *its*
+  half now holds your state. This is swapping with a data qubit in place of a link
+  half, which is why the validated repeater code already contained the primitive.
+  Cost: 1 pair + 2 classical bits. The data qubit is consumed (no-cloning).
+- **Telegate** (non-local CNOT), the cat-entangler / cat-disentangler construction:
+  CNOT your control onto your half of the pair and Z-measure it; the peer applies
+  X<sup>m₁</sup>, so its half now carries your control's *basis value* (legal — it
+  copies a basis value, not an unknown state), uses it as the control of a local
+  CNOT onto its target, then X-measures it away; you clear the phase kickback with
+  Z<sup>m₂</sup>. Cost: 1 pair + 1 bit each way. **The control never leaves its
+  node**, which is why a distributed compiler emits telegates, not teleports.
+
+Noise carries over unchanged. A Werner-w pair is wrong with probability 3(1−w)/4,
+and the three faulty Bell states land as Pauli errors: Z → phase error on the
+control, X → bit error on the target, XZ → both. So bit-error = phase-error =
+**(1−w)/2** — *the same curve as the E91 QBER*. A distributed gate and a distributed
+key degrade with distance identically, which is the platform's point: pair quality
+is one number that prices both.
+
+The classical plane is load-bearing here, but not in the way it first looks.
+Because the corrections are *Paulis*, a bit that arrives late does not have to
+become an error: the receiver can hold the qubit and apply it on arrival, carry it
+as a tracked **Pauli frame** through later Clifford gates, or — if the qubit is
+already measured — fold it into the recorded outcome by XOR (`correct_outcome`),
+since an X correction flips a Z-basis result and a Z correction flips an X-basis
+one. That is the same move §6 describes for a repeater chain, which XOR-composes L
+heralds and corrects once at the end. So **herald latency is a memory-time cost,
+not an error source**: what has to survive the wait is the qubit (or the frame).
+An error appears only when the correction is permanently unavailable, or arrives
+after the result has been irreversibly consumed — and *that* costs 50%, because
+each correction bit protects exactly one Pauli channel.
+
+**In the code.**
+
+- `qstate_qiskit.py::QiskitRegister` — a drop-in for `QStateRegister` (identical
+  interface, so `RemoteQuantumManager` and everything above it are unchanged) backed
+  by `qiskit.quantum_info.Statevector`, adding the one operation a QKD register has
+  no reason to offer: `apply_circuit(ids, QuantumCircuit)`, i.e. "run this circuit on
+  my local qubits". `qstate_core` gained `alloc` / `apply_gate` / `statevector` so the
+  primitives run on both backends. Endianness — qfabric groups are MSB-first, Qiskit
+  is little-endian — is pinned by a CNOT truth-table test on both.
+- `dqc.py` — the primitives, each split into the steps a *single node* runs with the
+  classical bits returned explicitly, so distributing them is only a matter of
+  putting those bits on the link: `teleport_send`/`teleport_recv`,
+  `telegate_cnot_send`/`_apply`/`_finish`.
+- `distributed_dqc.py` (`node_runner --protocol dqc`) does exactly that across two
+  processes: alice is the control node **and** the register authority, bob the target
+  node whose half of each gate is an op over the wire (the same seam the repeater
+  station uses for its BSMs). m1 travels A→B inside `PLAN`, m2 returns B→A inside
+  `ACK`, and each side applies **the value that arrived** — so `--dqc-drop` really
+  corrupts the computation instead of pretending to. `--dqc-late` withholds the bit
+  for the gate and folds it in afterwards, which recovers the result exactly.
+
+**See it run:** `test_two_node_dqc.py` — the whole thing across two processes over a
+real link, including the global-timeline certificate at a 100 km modeled delay. And
+`test_dqc.py` — exact transfer and the CNOT truth table at w=1;
+telegate on |+⟩|0⟩ producing |Φ⁺⟩ correlated in Z *and* X (coherent, not a classical
+copy of a measured bit); the (1−w)/2 law on both error channels; a
+*permanently lost* correction bit costing 50% on the one channel it protects while a
+*late* one is recovered exactly; and numpy vs Qiskit agreeing shot for shot.
+
+---
+
+## Part II — From quantum effects to a secret key
+
 ### 7 · The pipeline spine: transmit → sift → estimate → distill
 
 Every protocol in the repo ends the same way. Learn this spine once:
@@ -752,6 +824,9 @@ hook it would plug into.
 | CHSH S = 2√2·f, angles | `qne-sequence/qne_sequence/e91.py::chsh_value`, `_ANGLE` |
 | Bell-state measurement (swap) + heralds | `qstate_core.py::bell_measure` (CNOT+H+ZZ) |
 | Heralded Pauli correction X^m2·Z^m1 | `qstate_core.py::apply_pauli`, used in `repeater.py`/`distributed_repeater.py` |
+| Quantum teleportation (state transfer) | `dqc.py::teleport_send` / `teleport_recv` |
+| Non-local CNOT (cat-entangler/disentangler) | `dqc.py::telegate_cnot_send` / `_apply` / `_finish` |
+| Arbitrary local circuits on a node's qubits | `qstate_qiskit.py::QiskitRegister.apply_circuit` |
 | Werner-chain law F=(1+3f^L)/4 | emerges; checked in `repeater.py` results vs `chain_*` helpers |
 | Distributed repeater (3 processes, herald link) | `qne-sequence/qne_sequence/distributed_repeater.py` |
 | Fiber loss 1−10^(−αL/10) in the data plane | `p4/bmv2/quantum_channel.p4` + `qne/config.py::loss_threshold_u32` |

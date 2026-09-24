@@ -217,6 +217,42 @@ E91 and repeater runs still use the wall-clock timeline below.
 - **Efficient BB84.** With `basis_bias ≠ 0.5` the key is Z–Z matches only; every X–X match
   is disclosed for the phase-error estimate (both paths).
 
+## Distributed computing (added 2026-09-24 — ROADMAP Phase 6)
+
+- **One register, two QPUs.** The distributed-gate primitives (`qne-sequence/qne_sequence/dqc.py`)
+  run against a single `QStateRegister`/`QiskitRegister` holding both nodes' qubits — the
+  same centralized-quantum-manager model E91 and the repeater chain already use, and the
+  Argonne-aligned choice endorsed in the 2026-07-14 review. So the *state* is not spatially
+  separated even when the processes are; what is genuinely distributed is the op stream and
+  the classical bits. Read a result as "two QPUs with a shared state authority", not "two
+  isolated QPUs".
+- **Pair noise is a per-shot Pauli, not a density matrix.** `create_bell_pair(w)` samples one
+  of the four Bell states (stochastic unravelling of the Werner state), so a faulty pair shows
+  up as a random Pauli error on the computed result. Correct in expectation for this noise
+  model, and it keeps the backend a statevector; it is *not* correct for anything needing the
+  coherences of a genuinely mixed input.
+- **Fidelity does not decay while a pair waits.** `w` is fixed at creation; there is no memory
+  decoherence over the herald's flight time. This is the single biggest optimism in the
+  distributed-computing story — at WAN latencies the wait, not the link, is what should
+  dominate. This is sharpened by the Pauli-frame result in `dqc.py`: a *late* correction
+  is recovered exactly (tests pin this), so with no decoherence model the emulator says
+  herald latency is free, which is wrong for any real memory. Until `F(t)` lands, do not
+  quote distributed-gate fidelity as a function of distance.
+- **No local gate noise.** Each site's circuits are exact. Only the network-supplied
+  entanglement is noisy, so reported errors are a *floor* attributable to the network.
+- **Scale.** Statevector, so the joint register is practical to roughly 20–24 qubits.
+- **Distributed, but not yet on a slice.** `node_runner --protocol dqc` runs the gate
+  across two processes with the corrections as real protocol messages, validated over
+  loopback (TCP) including the global-timeline certificate. It has **not** run on FABRIC
+  hardware, and the raw-L2 classical backend (`--classical-transport l2`) is selectable
+  but unexercised for this protocol.
+- **Bob's ops execute on alice's register.** Bob holds no local state, so "bob applies
+  X^m1 and a local CNOT" is an RPC that alice's service performs on his behalf — the
+  centralized-QM consequence stated above. What is genuinely on the wire is the op
+  stream and the correction bits; the corrections — including a deferred Pauli frame —
+  are applied from the *received* values, so withholding or corrupting one on the wire
+  really does corrupt the result.
+
 ## Consistency across implementations (for cross-validation)
 
 Cross-validation only means something if every backend runs under the **same physical

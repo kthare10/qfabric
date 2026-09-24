@@ -112,6 +112,72 @@ and the netem cost-measurement datasets).
 
 ---
 
+## Phase 6 — Distributed Quantum Computing 🟡
+
+Entanglement as a *compute* resource, not only a key resource: two QPUs that share
+no qubit run one circuit by consuming Bell pairs and classical bits — the same two
+currencies the rest of the platform already measures.
+
+- ✅ **Circuit-capable quantum layer** (`qne-sequence/qne_sequence/qstate_qiskit.py`).
+  `QiskitRegister` is a drop-in for `qstate_core.QStateRegister` (same interface, so
+  `RemoteQuantumManager` and everything above it are untouched — the argument
+  `qstate_sequence.py` made for SeQUeNCe) backed by `qiskit.quantum_info.Statevector`,
+  plus the one thing a computation needs and a QKD register lacks: `apply_circuit`,
+  which runs an ordinary `QuantumCircuit` over a node's local qubits. No Aer needed.
+  `qstate_core` gained `alloc` / `apply_gate` / `statevector` so both backends carry
+  the primitives. Endianness (qfabric groups are MSB-first, Qiskit is little-endian)
+  is pinned by a CNOT truth-table test on both.
+- ✅ **Primitives** (`qne-sequence/qne_sequence/dqc.py`), each split into the steps one
+  node executes locally with the classical bits returned explicitly, so the
+  distributed runner only has to put those bits on the wire:
+  - `teleport_send` / `teleport_recv` — 1 pair + 2 bits, A→B. The send step is exactly
+    `bell_measure(data, epr_a)`: swapping *is* teleporting half a pair.
+  - `telegate_cnot_send` / `_apply` / `_finish` — non-local CNOT, 1 pair + 1 bit each
+    way, control stays put. This is the primitive a distributed compiler emits.
+- ✅ **Validated on both backends, shot for shot** (`tests/test_dqc.py`, 54 tests):
+  exact transfer / truth table at w=1; telegate on |+⟩|0⟩ produces Φ+ (correlated in
+  Z *and* X — coherent, not a classical copy); **error rate (1−w)/2 for teleport, and
+  for the telegate's bit and phase channels alike — the same curve as the E91 QBER**;
+  a permanently lost correction bit costs 50% on the single Pauli channel it
+  protects, while a *late* one is recovered exactly by folding it into the outcome
+  (tracked Pauli frame) — so herald latency is a memory-time cost, not an error
+  source. `run_dqc_session` models the two regimes separately (`--drop` vs `--late`)
+  and validates its inputs rather than clamping them.
+- ✅ **Distributed over a real link** (`qne-sequence/qne_sequence/distributed_dqc.py`,
+  `node_runner --protocol dqc`). Alice is the control node and register authority;
+  bob is the target node and holds no local register, so his half of each gate is an
+  op over the wire — the same seam the repeater station uses for its BSMs. The
+  corrections are genuine protocol messages (m1 in `PLAN`, m2 in `ACK`) and **each
+  side applies the value as it arrived**, not one it could have computed locally,
+  which is what makes `--dqc-drop` a real control rather than a simulated one. A
+  *deferred* correction travels too, as an explicit Pauli frame (`frame_m1` /
+  `frame_m2`) built from the bits the peer actually received — never a local copy,
+  or a corrupted wire value would be repaired out of clean local state and
+  `--dqc-late` would claim a recovery that never happened
+  (`tests/test_dqc_wire_integrity.py` corrupts bits in flight to pin this).
+  `QuantumStateService` gained `alloc_batch` / `telegate_apply_batch` /
+  `teleport_recv_batch` / `discard_pair`. Both primitives, both Pauli channels,
+  `--dqc-drop` and `--dqc-late`, HMAC auth, fiber loss and the global timeline all
+  work; the raw-L2 classical backend is selectable but not yet exercised on a slice.
+  Validated in `tests/test_two_node_dqc.py` (15 tests, two processes over loopback):
+  exact gate at w=1, (1−w)/2 at w=0.9 on both channels, each dropped bit breaking
+  exactly the one channel it protects, every late bit recovered, loss costing gates
+  rather than fidelity, and the run **certified on the global timeline** at a 100 km
+  modeled delay (0 late events, sim-elapsed 3.92 ms) where the wall-clock control
+  is not certified.
+- ⬜ Run it on the slice (raw L2 through the P4 switch, `--classical-transport l2`),
+  the way BB84 and E91 already are.
+- ⬜ **Decohere the pair while it waits.** Fidelity is static today — it does not decay
+  over the herald's flight time. `F(t) = F₀·e^(−t/T₂)` keyed on the *measured* WAN
+  latency is the highest-value addition: at ~25 ms RTT against ms-scale memory
+  coherence, the pair dies before the correction bit lands, and quantifying that
+  crossover is the platform's own result rather than a simulator's.
+- ⬜ **A split application**: a circuit cut across two sites (e.g. 4-qubit QFT or
+  Grover, 2+2), reporting success probability and time-to-result against *measured*
+  pair rate, hop count and latency.
+- ⬜ Entanglement distillation to trade pairs for fidelity once the above shows the
+  fidelity floor.
+
 ---
 
 ## Protocol Backlog
@@ -124,7 +190,8 @@ Priority order from the research plan:
 | **Decoy-state BB84** | 🟡 | PNS-*aware* key-rate accounting (no PNS adversary is modeled; the bounds are asserted, not attacked) (`qne/decoy.py`): weak-coherent Poisson source, 3 intensities, full Ma–Qi–Zhao–Lo Y1/e1 bounds → GLLP secure key rate; sweep + figure via `scripts/decoy_sweep.py`. **Runs on the live transport** (`node_runner --decoy`: real per-pulse photon numbers, measured per-intensity gains/QBERs feed the analysis); TCP transport only — the raw 0x7101 frame has no photon-count field yet. |
 | **E91 / BBM92 QKD** | ✅ | Entanglement-based QKD on the shared quantum-state service (`qne-sequence/qstate_core.py`, `e91.py`), running **distributed over 2 nodes** (`distributed_e91.py`, `remote_qm.py`; `--protocol e91\|bbm92`). Werner-state model ties QBER=(1−F)/2 and CHSH S=2√2·F; Bell-test coordination + basis/sample disclosure ride the real link; sift/QBER reuse `BB84Protocol`. |
 | **Entanglement swapping** (repeaters) | ✅ (3-node) | BSM swap op + heralded correction validated in-process (`repeater.py`), across 3 processes (`distributed_repeater.py`), and **on a live FABRIC slice (2026-07-13)** — identical keys over a swapped chain with heralds on a real WAN segment. n-node chains (>1 station) are next. |
-| **Quantum teleportation** | ⬜ | Stretch goal; classical bits per teleport |
+| **Quantum teleportation** | ✅ (local) | `dqc.teleport_*` — the send step IS `bell_measure`, so the validated repeater code already contained it. Exact state transfer at w=1; error (1−w)/2 at Werner weight w. 1 pair + 2 classical bits. Not yet distributed across processes. |
+| **Non-local CNOT (telegate)** | ✅ (local) | `dqc.telegate_cnot_*` — cat-entangler / cat-disentangler (Eisert et al. 2000). 1 pair + 1 bit each way; the control stays on its node. Bit *and* phase error both (1−w)/2. Not yet distributed across processes. |
 
 ---
 

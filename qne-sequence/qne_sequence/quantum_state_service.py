@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import dqc
 from .qstate_core import QStateRegister
+
+_PLUS = np.array([1, 1], dtype=complex) / np.sqrt(2.0)
 
 
 class QuantumStateService:
@@ -72,6 +75,43 @@ class QuantumStateService:
     def apply_correction(self, qubit_id: int, x: int, z: int) -> None:
         """Apply the heralded Pauli correction X^x·Z^z (restores Φ+ after swaps)."""
         self.register.apply_pauli(qubit_id, x=x, z=z)
+
+    # -- distributed computing (ROADMAP Phase 6) --------------------------------
+
+    def alloc_batch(self, count: int, state: str = "zero") -> list[int]:
+        """Allocate ``count`` fresh data qubits in |0> or |+> and return their ids.
+
+        A node's *local* qubits still live in the shared register — the centralized
+        quantum-manager model the entanglement protocols already use (ASSUMPTIONS).
+        """
+        amp = None if state == "zero" else _PLUS
+        if state not in ("zero", "plus"):
+            raise ValueError(f"unknown data state {state!r} (expected 'zero'/'plus')")
+        return [self.register.alloc(amp) for _ in range(count)]
+
+    def telegate_apply_batch(self, requests: list[tuple[int, int, int]]) -> list[int]:
+        """Serve the target node's half of a non-local CNOT, batched.
+
+        ``requests`` are (epr_half, target_id, m1) — the peer's own qubits and the
+        correction bit **as it arrived over the link**. Returns the m2 bits the peer
+        owes back to the control node.
+        """
+        return [dqc.telegate_cnot_apply(self.register, epr, target, m1)
+                for epr, target, m1 in requests]
+
+    def teleport_recv_batch(self, requests: list[tuple[int, int, int]]) -> None:
+        """Apply X^m2.Z^m1 to each received half — the receiver's half of a teleport."""
+        for epr, m1, m2 in requests:
+            dqc.teleport_recv(self.register, epr, m1, m2)
+
+    def discard_pair(self, a_id: int, b_id: int) -> None:
+        """Retire a pair whose transported half was lost in the channel.
+
+        Measured out rather than deleted, so no half-consumed group is ever left
+        behind for a later gate to entangle itself with.
+        """
+        self.measure(a_id, 0.0)
+        self.measure(b_id, 0.0)
 
     def drop(self, qubit_id: int) -> None:
         """Discard a lost qubit's state so its group can be garbage-collected."""

@@ -23,6 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 sequence = ["sequence==1.0.0"]  # install into a dedicated Python 3.12 env (scripts/setup_sequence_env.sh)
 netsquid = []  # Installed via NetSquid's own channel
+qiskit = ["qiskit>=1.0"]  # QiskitRegister: circuit-capable quantum layer (ROADMAP Phase 6)
 fabric = ["fabrictestbed-extensions>=1.6"]
 dev = [
     "pytest>=7.0",
