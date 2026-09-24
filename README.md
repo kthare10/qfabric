@@ -1,6 +1,6 @@
 # QFabric: Quantum Network Emulation Platform on FABRIC
 
-QFabric is a programmable quantum network emulation platform built on the [FABRIC testbed](https://fabric-testbed.net). It runs quantum-network protocols — BB84 QKD (with decoy-state accounting), entanglement-based QKD (E91/BBM92) and entanglement-swapping repeater chains — as **real distributed systems** on testbed nodes, with the *fiber* emulated in a P4/BMv2 data plane and cross-validated against the SeQUeNCe and NetSquid simulators.
+QFabric is a programmable quantum network emulation platform built on the [FABRIC testbed](https://fabric-testbed.net). It runs quantum-network protocols — BB84 QKD (with decoy-state accounting), entanglement-based QKD (E91/BBM92), entanglement-swapping repeater chains, and distributed quantum *computing* (teleportation and the non-local CNOT between two QPUs) — as **real distributed systems** on testbed nodes, with the *fiber* emulated in a P4/BMv2 data plane and cross-validated against the SeQUeNCe and NetSquid simulators.
 
 **What is emulated and what is real (read `ASSUMPTIONS.md` before quoting any number):**
 
@@ -12,7 +12,7 @@ QFabric is a programmable quantum network emulation platform built on the [FABRI
 
 The design bet: *the switch is the fiber*, carrying both "wavelengths". Slices are **single-site** by default — a photon cannot cross a WAN — and one distance knob (`--distance-km` / `--channel-delay auto`) drives both fiber loss and classical propagation delay (~5 µs/km). Cross-site slices and netem impairments are **stress studies**, not operating conditions: a real QKD classical channel has no loss and ~zero delay (SeQUeNCe-team feedback, 2026-07; see `ASSUMPTIONS.md`).
 
-New to quantum networking? Start with [`PRIMER.md`](PRIMER.md) (concepts from zero, no code), then [`CONCEPTS.md`](CONCEPTS.md) (concept → code map). [`SPEC.md`](SPEC.md) has the wire formats and protocol messages, [`ASSUMPTIONS.md`](ASSUMPTIONS.md) the modeling assumptions, [`ROADMAP.md`](ROADMAP.md) status and open items, and [`REVIEW_2026-09-21.md`](REVIEW_2026-09-21.md) the latest code review with what was fixed and what remains.
+New to quantum networking? Start with [`PRIMER.md`](PRIMER.md) (concepts from zero, no code), then [`CONCEPTS.md`](CONCEPTS.md) (concept → code map). [`SPEC.md`](SPEC.md) has the wire formats and protocol messages, [`ASSUMPTIONS.md`](ASSUMPTIONS.md) the modeling assumptions, [`ROADMAP.md`](ROADMAP.md) status and open items, and [`docs/reviews/2026-09-21.md`](docs/reviews/2026-09-21.md) the latest code review with what was fixed and what remains. Release process and reference material live under [`docs/`](docs/).
 
 Repository: <https://github.com/kthare10/qfabric>
 
@@ -31,7 +31,7 @@ Repository: <https://github.com/kthare10/qfabric>
 Two implementations share the physics and post-processing code (`qne/bb84.py`, `qne/detector.py`, `qne/reconcile.py`, `qne/finite_key.py`, `qne/decoy.py`, `qne/auth.py`):
 
 - **`qne/`** — the hand-coded raw-socket BB84 path: `qfabric alice` / `qfabric bob` CLIs, photons as `0x7101` frames through the switch, classical post-processing over TCP. This is the measured data point in the simulator cross-validation.
-- **`qne-sequence/`** — the distributed runtime built on SeQUeNCe's timeline: BB84 (incl. decoy source, biased bases, Eve), E91/BBM92 over a shared quantum-state service, n-node repeater chains, raw-L2 classical transport, lookahead delivery with a per-run fidelity certificate. See [`qne-sequence/README.md`](qne-sequence/README.md).
+- **`qne-sequence/`** — the distributed runtime built on SeQUeNCe's timeline: BB84 (incl. decoy source, biased bases, Eve), E91/BBM92 over a shared quantum-state service, n-node repeater chains, distributed computing (`--protocol dqc`), raw-L2 classical transport, and a global timeline with a per-run fidelity certificate. See [`qne-sequence/README.md`](qne-sequence/README.md).
 
 ## Components
 
@@ -44,7 +44,8 @@ Two implementations share the physics and post-processing code (`qne/bb84.py`, `
 | `validation/` | Platform-neutral scenarios + adapters for QFabric-sim, SeQUeNCe, NetSquid and the statistical agreement test |
 | `notebooks/` | `00_overview` → `fabric/` (01–06 slice workflow) → `sequence/` (07–09 distributed runtime) → `concepts/` (10–13 teaching demos) |
 | `kiso/`, `docker/` | Kiso experiment config; prebuilt BMv2 image (GHCR) |
-| `tests/`, `qne-sequence/tests/` | 120 core + 96 distributed tests (physics-validated, run in CI) |
+| `docs/` | Release process (`artifact-publishing.md`), code reviews (`reviews/`), transcribed references (`refs/`) |
+| `tests/`, `qne-sequence/tests/` | 139 core + 208 distributed tests (physics-validated, run in CI) |
 
 ## Quick Start
 
@@ -96,6 +97,7 @@ Fiber loss `P(loss) = 1 − 10^(−α·L/10)` is installed in the switch as `thr
 - A **measured** QFabric point is a real distributed run whose fiber loss and noise are statistical models in the switch and the detector. It validates the *protocol and the platform*, not photonics.
 - The **decoy-state** pipeline (Ma–Qi–Zhao–Lo bounds, GLLP rate) runs on the distributed TCP-descriptor transport with a Poisson source; it has **not** run through the P4 photon path (the `0x7101` frame has no photon-count field) and no photon-number-splitting adversary is modeled. It is honest key-rate accounting for a realistic source, not a demonstrated defense.
 - **CHSH > 2** across nodes shows the shared-state service and the heralded corrections are correct across real links; it is **not** a physical Bell-inequality test.
+- A **distributed gate** (`--protocol dqc`) spends a Bell pair and puts its correction bits on the real link, and errs at `(1−w)/2` — the same curve as the E91 QBER. The two QPUs share one register authority, and a pair's fidelity does not decay while it waits, so distributed-gate fidelity is **not** yet a function of distance.
 - The **lookahead certificate** (`lookahead.certified`) is meaningful only when a nonzero channel delay was modeled; with `channel_delay = 0` it is reported as not applicable.
 - Finite-key lengths use the TLGR constant; small blocks (≲ 10⁴ sampled bits) legitimately yield **zero** secret bits. Every reconciled run ends with a key-verification tag; a mismatch aborts with no key.
 
