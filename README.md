@@ -42,7 +42,7 @@ Two implementations share the physics and post-processing code (`qne/bb84.py`, `
 | `p4/` | BMv2 P4 program: per-wavelength fiber-loss drop for `0x7101`, lossless forwarding for `0x7102`, counters; PTF tests |
 | `scripts/` | `deploy_fabric.py` (slice, switch, runs, sweeps, cross-validation, netem, repeater bridge), `decoy_sweep.py`, env setup |
 | `validation/` | Platform-neutral scenarios + adapters for QFabric-sim, SeQUeNCe, NetSquid and the statistical agreement test |
-| `notebooks/` | All slice notebooks: `00_overview`, then `fabric/` (deploy, run, analyse), `sequence/` (distributed runtime) and `concepts/` (one capability each) |
+| `notebooks/` | `00_overview` (orientation + environment check, no slice), then the slice notebooks: `fabric/` (deploy, run, analyse), `sequence/` (distributed runtime), `concepts/` (one capability each) |
 | `docker/` | Prebuilt BMv2 image (GHCR) |
 | `docs/` | All documentation: `PRIMER` → `CONCEPTS`, plus `SPEC`, `ASSUMPTIONS`, `ROADMAP`, release process, `reviews/`, `refs/` |
 | `tests/`, `qne-sequence/tests/` | Physics-validated unit tests + multi-process loopback runs; both suites run in CI (see Install for how to run them) |
@@ -51,9 +51,10 @@ Two implementations share the physics and post-processing code (`qne/bb84.py`, `
 
 ### Notebooks — run in order
 
-**Every notebook runs on a FABRIC slice** and is numbered within its folder, so a notebook
-is named by its folder (`fabric/02`, `concepts/05`). Start with `fabric/01`; the other two
-tracks assume the slice it builds.
+Open `00_overview` first — it checks your environment and needs no slice. **Every notebook
+after it runs on a FABRIC slice**, numbered within its folder, so a notebook is named by its
+folder (`fabric/02`, `concepts/05`). Start with `fabric/01`; the other two tracks assume the
+slice it builds.
 
 | Folder | # | Notebook | What it does |
 |---|---|----------|--------------|
