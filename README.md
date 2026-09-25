@@ -43,7 +43,7 @@ Two implementations share the physics and post-processing code (`qne/bb84.py`, `
 | `scripts/` | `deploy_fabric.py` (slice, switch, runs, sweeps, cross-validation, netem, repeater bridge), `decoy_sweep.py`, env setup |
 | `validation/` | Platform-neutral scenarios + adapters for QFabric-sim, SeQUeNCe, NetSquid and the statistical agreement test |
 | `notebooks/` | `00_overview` → `fabric/` (01–06 slice workflow) → `sequence/` (07–09 distributed runtime) → `concepts/` (10–13 teaching demos) |
-| `kiso/`, `docker/` | Kiso experiment config; prebuilt BMv2 image (GHCR) |
+| `docker/` | Prebuilt BMv2 image (GHCR) |
 | `docs/` | Release process (`artifact-publishing.md`), code reviews (`reviews/`), transcribed references (`refs/`) |
 | `tests/`, `qne-sequence/tests/` | 139 core + 208 distributed tests (physics-validated, run in CI) |
 

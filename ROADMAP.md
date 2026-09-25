@@ -105,7 +105,7 @@ and the netem cost-measurement datasets).
 
 ## Phase 5 — Packaging & Reproducibility ⬜
 
-- 🟡 Kiso experiment templates (local + FABRIC configs exist; parameterize topology).
+- ⬜ Parameterized experiment templates (the Kiso config was removed 2026-09-24; `scripts/deploy_fabric.py` is the supported path).
 - ✅ Containerized BMv2 toolchain (`docker/Dockerfile.bmv2`, Ubuntu-based) + GHCR publish workflow; switch can pull a prebuilt image instead of building from source (`QFABRIC_BMV2_IMAGE`).
 - ⬜ One-click parameterized topology template.
 - ⬜ Artifact submission for reproducibility evaluation.

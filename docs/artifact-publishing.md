@@ -105,6 +105,6 @@ See <code>README.md</code>, <code>SPEC.md</code>, and <code>ROADMAP.md</code>.</
 - [ ] `pytest tests/ -v` passes
 - [ ] `python -m validation.compare validation/scenarios/baseline_1km.yml` reports honestly (uninstalled simulators show SKIPPED, not PASS; <2 backends → INCONCLUSIVE)
 - [ ] Notebooks 0–4 run in order on a FABRIC slice (01 setup → 02 run → 03 cross-validate → 04 analysis)
-- [ ] No personal paths/secrets (kiso `rc_file` uses `${FABRIC_RC}` / `${HOME}`; NetSquid creds come from `NETSQUID_USER`/`NETSQUID_PASS`, not hard-coded)
+- [ ] No personal paths/secrets (NetSquid creds come from `NETSQUID_USER`/`NETSQUID_PASS`, not hard-coded)
 - [ ] Tarball excludes `.venv*`, `.git`, caches, `cc-usage-log.md`, generated `cross_validation.json`
 - [ ] LICENSE (Apache-2.0) and CITATION.cff present
