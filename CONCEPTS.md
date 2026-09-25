@@ -193,7 +193,8 @@ classically. Worked through in [`PRIMER.md`](PRIMER.md) §3.2.
   angles (§1) are both exact.
 
 **Measured on real hardware:** the distributed E91 run on the FABRIC testbed
-produced CHSH > 2 across a real WAN (results in `results/fabric_e91_*.json`), and
+produced CHSH > 2 across a real WAN (re-record with notebook `12_repeater_fabric`;
+run outputs are not tracked), and
 the three-node repeater run reproduced a violation across a *swapped* chain (§6).
 
 **See it run:** `test_e91.py` (S ≈ 2√2 at f=1; S = 2√2·f under noise), notebook

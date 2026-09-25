@@ -27,22 +27,14 @@ Thumbs.db
 !.env.example
 
 # Project specific
-# Ignore results CONTENTS (not the dir) so the sample-result exceptions below work.
-results/*
+# Run outputs are never tracked. Slice measurements are reproduced by running on
+# FABRIC (notebooks fabric/01-05); the loopback sweeps by sweep.py / plots.py /
+# decoy_sweep.py. Previously recorded evidence lives in git history, not the tree.
+results/
+qne-sequence/results/
 secrets/
 *.json
 !p4/**/*.json
-# Keep the bundled sample results so the analysis notebook runs without a slice
-!results/fabric_alice_results.json
-!results/fabric_bob_results.json
-!results/fabric_seq_alice.json
-!results/fabric_seq_bob.json
-!results/fabric_e91_alice.json
-!results/fabric_e91_bob.json
-!qne-sequence/results/sequence_scenarios.json
-!results/decoy_scenarios.json
-!results/timeline_2026-09-21/
-!results/timeline_2026-09-21/*
 *.pcap
 
 # Personal session tracking — never ship in the artifact

@@ -56,7 +56,7 @@ Two implementations share the physics and post-processing code (`qne/bb84.py`, `
 | 0 | `00_overview` | Orientation + environment check | Anywhere |
 | 1 | `fabric/01_setup_slice` | Provision the (single-site) slice, start BMv2, load the P4 tables | FABRIC JupyterHub |
 | 2 | `fabric/02_run_experiment` | Raw-socket BB84 across the slice, collect + verify | FABRIC JupyterHub |
-| 4 | `fabric/04_analysis` | Plots and tables from bundled or fresh results | Anywhere |
+| 4 | `fabric/04_analysis` | Plots and tables from the results notebook 2 recorded | Anywhere, after 2 |
 | 5 | `fabric/05_run_all_scenarios` | **Every** scenario (singles + distance/attenuation sweeps) with 4-way cross-validation; switch loss updated in place per point | FABRIC JupyterHub |
 | 6 | `fabric/06_network_effects` | **Stress study**: classical latency/jitter/loss vs time-to-key | FABRIC JupyterHub |
 | 7 | `sequence/07_sequence_emulator` | Distributed BB84, both channels raw L2 through the switch, lookahead certificate | FABRIC JupyterHub |

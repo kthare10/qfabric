@@ -132,7 +132,8 @@ wall-clock speed, on any network — the run is an exact distributed execution o
 sequential simulator's schedule. `tests/test_time_authority.py` shows BB84, E91 and the
 3-process repeater chain all certified at a modeled delay far below real message latency,
 and the wall-clock timeline failing the identical runs with identical physics; the same
-contrast holds on a live slice (`results/timeline_2026-09-21/`).
+contrast holds on a live slice (artifacts in git history at `9692ae3`,
+`results/timeline_2026-09-21/`).
 **Read the certificate with its coverage:** `on_time_events + late_events` is how many
 frames were actually checked; on the slice run above that is 374 of 374, i.e. the whole
 run. Two mechanisms enforce the same contract: the protocol timeline phase is paced by

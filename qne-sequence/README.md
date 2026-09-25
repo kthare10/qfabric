@@ -47,7 +47,8 @@ stock BB84 *does* trip the guard; every run reports `remote_access_errors` (must
 | Entanglement | `qstate_core.py`, `quantum_state_service.py`, `remote_qm.py`, `e91.py`, `distributed_e91.py` | Werner weight `w` (the `fidelity` knob; results also report `bell_fidelity = (3w+1)/4`), QBER = (1−w)/2, CHSH S = 2√2·w; sift/QBER/Cascade/PA/finite-key over the real link |
 | Repeater chains | `repeater.py`, `distributed_repeater.py`, `sequence_swap_poc.py` | BSM swap + heralded Pauli correction, K stations (K+2 processes), Werner-chain law F = (1+3wᴸ)/4; `qstate_sequence.py` = SeQUeNCe `QuantumManagerKet`-backed register |
 
-Harnesses: `bench_throughput.py`, `sweep.py`, `plots.py`; outputs in `results/`.
+Harnesses: `bench_throughput.py`, `sweep.py`, `plots.py`; they write `results/`, which is
+scratch — regenerate rather than expecting it in a fresh checkout.
 Tests: `tests/` (96, two-/three-/n-process loopback runs), run with `PYTHONPATH=.. pytest tests -q`.
 
 ## Running it
@@ -87,7 +88,7 @@ amplified secret as `key` (`null` when the accounting allows zero bits).
 On FABRIC use `deploy_fabric.run_sequence_bb84 / run_sequence_e91 / run_sequence_repeater`
 from `notebooks/sequence/07–09`; `deploy_fabric.setup_sequence_runtime` builds `.venv-qne`
 on the nodes. Slice runs recorded 2026-08-04 used `classical_transport: l2` for both BB84 and
-E91 (`../results/fabric_seq_*.json`, `fabric_e91_*.json`).
+E91 (recorded to `../results/` by `deploy_fabric.py`; not tracked).
 
 ## Open items
 

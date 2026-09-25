@@ -11,8 +11,9 @@ bash scripts/package_artifact.sh v0.1.0
 # -> dist/qfabric-v0.1.0.tgz   (clean: no .venv, .git, caches, or personal files)
 ```
 
-The tarball extracts to a top-level `qfabric/` directory and bundles sample results
-(`results/fabric_*_results.json`) so the analysis notebook runs without a slice.
+The tarball extracts to a top-level `qfabric/` directory. Run outputs are **not**
+included — notebooks `fabric/01`–`02` record them on a slice, and `04` reads what
+they wrote.
 
 ## 2. Artifact metadata
 
