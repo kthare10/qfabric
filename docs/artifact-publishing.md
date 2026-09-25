@@ -13,7 +13,10 @@ bash scripts/package_artifact.sh v0.1.0
 
 The tarball extracts to a top-level `qfabric/` directory. Run outputs are **not**
 included — notebooks `fabric/01`–`02` record them on a slice, and `04` reads what
-they wrote.
+they wrote. The script excludes `results/` at any depth, along with `CLAUDE.md`,
+`paper/`, `secrets/`, `.env*` and any `.log`/`.pcap`, then **re-inspects the finished
+tarball and deletes it with a nonzero exit if any of those slipped in** — `tar` does
+not read `.gitignore`, so the check, not the ignore file, is what enforces this.
 
 ## 2. Artifact metadata
 

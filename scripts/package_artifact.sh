@@ -45,8 +45,16 @@ EXCLUDES=(
   --exclude='*.egg-info' --exclude='dist' --exclude='build'
   --exclude='.idea' --exclude='.vscode' --exclude='.DS_Store' --exclude='.ipynb_checkpoints'
   --exclude='._*' --exclude='cc-usage-log.md' --exclude='*.log' --exclude='*.pcap'
-  --exclude='results/cross_validation.json' --exclude='results/all_scenarios.json'
-  --exclude='results/network_effects.json' --exclude='results/_tmp_scenarios'
+  # Run outputs: exclude the directories wholesale, at any depth (root results/
+  # and qne-sequence/results/). Naming individual files here silently rots --
+  # tar does not read .gitignore, so this list is the only thing enforcing the
+  # "no run outputs" promise in docs/artifact-publishing.md. Both pattern forms
+  # are given because GNU tar and bsdtar differ on whether a bare name matches
+  # an interior path component.
+  --exclude='results' --exclude='*/results'
+  # Local-only material that must never leave this machine.
+  --exclude='CLAUDE.md' --exclude='paper' --exclude='secrets'
+  --exclude='.env' --exclude='.env.*' --exclude='.ruff_cache'
   --exclude='p4/bmv2/*.json'
 )
 
@@ -74,6 +82,17 @@ print(f"  stripped outputs from {count} notebooks")
 PY
 
 tar -czf "${TARBALL}" -C "${STAGE}" "$(basename "${PROJECT_DIR}")"
+
+# Enforce the guarantee rather than trusting the list above: if anything that
+# must not ship made it in, fail loudly instead of publishing it.
+FORBIDDEN="$(tar -tzf "${TARBALL}" | grep -E '(^|/)results/|(^|/)(CLAUDE\.md|cc-usage-log\.md|\.env)$|(^|/)(secrets|paper)/|\.(log|pcap)$' || true)"
+if [[ -n "${FORBIDDEN}" ]]; then
+  echo "ERROR: artifact contains files that must not be published:" >&2
+  echo "${FORBIDDEN}" | sed 's/^/  /' >&2
+  rm -f "${TARBALL}"
+  exit 1
+fi
+echo "Verified: no run outputs, credentials, or local-only files in the tarball."
 
 echo "Built artifact: ${TARBALL}"
 echo "Size: $(du -h "${TARBALL}" | cut -f1)"
