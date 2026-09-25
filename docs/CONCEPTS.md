@@ -770,6 +770,10 @@ hook it would plug into.
 | Biased-basis BB84 | `…/test_two_node_biased.py` |
 | Raw-socket reconcile path | `tests/test_raw_path_reconcile.py` |
 | Cross-validation harness | `tests/test_validation.py` |
+| Teleport / non-local CNOT, both register backends | `qne-sequence/tests/test_dqc.py` |
+| Distributed gate over a link, drop vs late controls | `qne-sequence/tests/test_two_node_dqc.py` |
+| Corrections must come from the wire, not local state | `qne-sequence/tests/test_dqc_wire_integrity.py` |
+| Global timeline: LBTS grants, no late frames | `qne-sequence/tests/test_time_authority.py`, `…/test_lookahead.py` |
 
 ---
 

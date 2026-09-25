@@ -244,9 +244,11 @@ E91 and repeater runs still use the wall-clock timeline below.
 - **Scale.** Statevector, so the joint register is practical to roughly 20–24 qubits.
 - **Distributed, but not yet on a slice.** `node_runner --protocol dqc` runs the gate
   across two processes with the corrections as real protocol messages, validated over
-  loopback (TCP) including the global-timeline certificate. It has **not** run on FABRIC
-  hardware, and the raw-L2 classical backend (`--classical-transport l2`) is selectable
-  but unexercised for this protocol.
+  loopback (TCP) including the global-timeline certificate. A slice path exists —
+  `deploy_fabric.run_sequence_dqc` and `notebooks/concepts/05_distributed_computing` —
+  but **neither has been executed against FABRIC hardware**, so no number here comes
+  from the testbed. The raw-L2 classical backend (`--classical-transport l2`) is
+  selectable but unexercised for this protocol.
 - **Bob's ops execute on alice's register.** Bob holds no local state, so "bob applies
   X^m1 and a local CNOT" is an RPC that alice's service performs on his behalf — the
   centralized-QM consequence stated above. What is genuinely on the wire is the op

@@ -49,7 +49,7 @@ stock BB84 *does* trip the guard; every run reports `remote_access_errors` (must
 
 Harnesses: `bench_throughput.py`, `sweep.py`, `plots.py`; they write `results/`, which is
 scratch — regenerate rather than expecting it in a fresh checkout.
-Tests: `tests/` (96, two-/three-/n-process loopback runs), run with `PYTHONPATH=.. pytest tests -q`.
+Tests: `tests/` (208, two-/three-/n-process loopback runs), run with `PYTHONPATH=.. pytest tests -q`.
 
 ## Running it
 
@@ -66,8 +66,11 @@ python -m qne_sequence.node_runner --role bob   --name bob   --peer alice --port
 python -m qne_sequence.node_runner --role alice --name alice --peer bob   --port 57123 --seed 1 $COMMON
 
 # E91 / BBM92 and repeater chains
-python -m qne_sequence.node_runner --protocol e91 ...          # see notebooks/sequence/09
-python -m qne_sequence.node_runner --protocol repeater --role alice|repeater|bob ...   # notebooks/concepts/12
+python -m qne_sequence.node_runner --protocol e91 ...          # see notebooks/sequence/03
+python -m qne_sequence.node_runner --protocol repeater --role alice|repeater|bob ...   # notebooks/concepts/03
+
+# Distributed computing — spend the pairs on a gate instead of a key
+python -m qne_sequence.node_runner --protocol dqc --dqc-primitive telegate ...  # notebooks/concepts/05
 ```
 
 Each runner prints one JSON result line: `qber`, `sifted_bits`, `num_sampled`,
@@ -85,8 +88,8 @@ amplified secret as `key` (`null` when the accounting allows zero bits).
 | raw L2, no switch | `--quantum-transport raw --loss model` | software | root + a direct L2 link |
 | **raw L2 + P4** (the FABRIC path) | `--quantum-transport raw --loss switch --classical-transport l2` | BMv2 P4 | the switch |
 
-On FABRIC use `deploy_fabric.run_sequence_bb84 / run_sequence_e91 / run_sequence_repeater`
-from `notebooks/sequence/07–09`; `deploy_fabric.setup_sequence_runtime` builds `.venv-qne`
+On FABRIC use `deploy_fabric.run_sequence_bb84 / run_sequence_e91 / run_sequence_repeater / run_sequence_dqc`
+from `notebooks/sequence/01–03`; `deploy_fabric.setup_sequence_runtime` builds `.venv-qne`
 on the nodes. Slice runs recorded 2026-08-04 used `classical_transport: l2` for both BB84 and
 E91 (recorded to `../results/` by `deploy_fabric.py`; not tracked).
 
