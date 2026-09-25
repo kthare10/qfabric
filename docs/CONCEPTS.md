@@ -87,7 +87,7 @@ security threshold (§12), so the run aborts and no key is issued. Eavesdropping
 converts directly into a measurable, thresholdable statistic.
 
 **See it run:** `tests/test_eve.py`, `qne-sequence/tests/test_two_node_eve.py`
-(distributed, over real sockets), notebook `10_eavesdropper`.
+(distributed, over real sockets), notebook `concepts/01_eavesdropper`.
 
 ---
 
@@ -193,12 +193,12 @@ classically. Worked through in [`PRIMER.md`](PRIMER.md) §3.2.
   angles (§1) are both exact.
 
 **Measured on real hardware:** the distributed E91 run on the FABRIC testbed
-produced CHSH > 2 across a real WAN (re-record with notebook `12_repeater_fabric`;
+produced CHSH > 2 across a real WAN (re-record with notebook `concepts/03_repeater`;
 run outputs are not tracked), and
 the three-node repeater run reproduced a violation across a *swapped* chain (§6).
 
 **See it run:** `test_e91.py` (S ≈ 2√2 at f=1; S = 2√2·f under noise), notebook
-`09_entanglement_e91`, notebook `12_repeater` §3.
+`sequence/03_entanglement_e91`, notebook `concepts/03_repeater` §3.
 
 ---
 
@@ -517,7 +517,7 @@ asserts `alice_key == bob_key` on the amplified output.
 path (`node_runner.py`) inserts `InterceptResendEve` into the photon stream
 (`distributed_qkd.receive_qubits`), and the measured QBER then reflects channel
 noise *plus* 0.25·f. The full-security demo: sweep f and watch `secure_fraction`
-collapse to 0 past threshold — notebook `10_eavesdropper`. Open items: a
+collapse to 0 past threshold — notebook `concepts/01_eavesdropper`. Open items: a
 beam-splitting/PNS Eve (motivates §16) and an Eve on the E91 path (would be caught
 by CHSH).
 
@@ -613,7 +613,7 @@ attacker-controlled sifting traffic. Enabled with `--auth-key` everywhere, inclu
 all three repeater links.
 
 **See it run:** `tests/test_auth.py` (tamper/replay/splice), `test_link_auth.py`,
-notebook `13_qkd_security` §3.
+notebook `concepts/04_qkd_security` §3.
 
 ### 19 · E91 / BBM92 — QKD from entanglement
 
@@ -809,5 +809,5 @@ hook it would plug into.
 | FABRIC deployment | `scripts/deploy_fabric.py` |
 
 *Companion reading:* `README.md` (workflow + notebook tracks), `qne-sequence/DESIGN.md`
-(distributed-runtime architecture), `ROADMAP.md` (status), notebooks 09–13 (live demos
+(distributed-runtime architecture), `ROADMAP.md` (status), the `concepts/` notebooks (live demos
 of Parts I–II).

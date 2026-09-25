@@ -97,7 +97,7 @@ E91 (recorded to `../results/` by `deploy_fabric.py`; not tracked).
 2. **Decoy on the raw path** (photon-count field in `0x7101`, per-photon thinning in P4)
    and a PNS Eve.
 3. **NetSquid reference on the slice** (`.venv-nsq` needs netsquid.org credentials via
-   `setup_sim_envs`) for the notebook-08 distance comparison.
+   `setup_sim_envs`) for the `sequence/02` distance comparison.
 4. Multi-site repeater topologies (one station per site) and the herald-latency dataset.
 5. Cascade BINARY is one RPC round-trip per block (dominates time-to-key at WAN RTT);
    batch per level.

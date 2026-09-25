@@ -42,7 +42,7 @@ Two implementations share the physics and post-processing code (`qne/bb84.py`, `
 | `p4/` | BMv2 P4 program: per-wavelength fiber-loss drop for `0x7101`, lossless forwarding for `0x7102`, counters; PTF tests |
 | `scripts/` | `deploy_fabric.py` (slice, switch, runs, sweeps, cross-validation, netem, repeater bridge), `decoy_sweep.py`, env setup |
 | `validation/` | Platform-neutral scenarios + adapters for QFabric-sim, SeQUeNCe, NetSquid and the statistical agreement test |
-| `notebooks/` | `00_overview` → `fabric/` (01–06 slice workflow) → `sequence/` (07–09 distributed runtime) → `concepts/` (10–13 teaching demos) |
+| `notebooks/` | All slice notebooks: `00_overview` → `fabric/` (01–05 deploy/run/analyse) → `sequence/` (01–03 distributed runtime) → `concepts/` (01–05 one capability each) |
 | `docker/` | Prebuilt BMv2 image (GHCR) |
 | `docs/` | All documentation: `PRIMER` → `CONCEPTS`, plus `SPEC`, `ASSUMPTIONS`, `ROADMAP`, release process, `reviews/`, `refs/` |
 | `tests/`, `qne-sequence/tests/` | 139 core + 208 distributed tests (physics-validated, run in CI) |
@@ -51,20 +51,28 @@ Two implementations share the physics and post-processing code (`qne/bb84.py`, `
 
 ### Notebooks — run in order
 
-| # | Notebook | What it does | Where |
-|---|----------|--------------|-------|
-| 0 | `00_overview` | Orientation + environment check | Anywhere |
-| 1 | `fabric/01_setup_slice` | Provision the (single-site) slice, start BMv2, load the P4 tables | FABRIC JupyterHub |
-| 2 | `fabric/02_run_experiment` | Raw-socket BB84 across the slice, collect + verify | FABRIC JupyterHub |
-| 4 | `fabric/04_analysis` | Plots and tables from the results notebook 2 recorded | Anywhere, after 2 |
-| 5 | `fabric/05_run_all_scenarios` | **Every** scenario (singles + distance/attenuation sweeps) with 4-way cross-validation; switch loss updated in place per point | FABRIC JupyterHub |
-| 6 | `fabric/06_network_effects` | **Stress study**: classical latency/jitter/loss vs time-to-key | FABRIC JupyterHub |
-| 7 | `sequence/07_sequence_emulator` | Distributed BB84, both channels raw L2 through the switch, lookahead certificate | FABRIC JupyterHub |
-| 8 | `sequence/08_sequence_scenarios` | Distance sweep of the distributed emulator vs the NetSquid reference | Anywhere (loopback) / FABRIC |
-| 9 | `sequence/09_entanglement_e91` | E91/BBM92 over two nodes, CHSH test, Cascade + PA | Anywhere / FABRIC |
-| 10–13 | `concepts/*` | Eavesdropper, reconciliation, repeater chains, security depth (finite key, auth, biased bases, live decoy) | Anywhere (local) |
+**Every notebook runs on a FABRIC slice** and is numbered within its folder, so a notebook
+is named by its folder (`fabric/02`, `concepts/05`). Start with `fabric/01`; the other two
+tracks assume the slice it builds.
 
-Tracks: **deploy** 0→1→2→5→4 (6 as stress); **learn QKD** 2→10→11→13; **entanglement** 9→12. On-slice variants of the concept demos (`concepts/fabric/*_fabric.ipynb`) are local-only.
+| Folder | # | Notebook | What it does |
+|---|---|----------|--------------|
+| `fabric/` | 01 | `01_setup_slice` | Provision the (single-site) slice, start BMv2, load the P4 tables |
+| | 02 | `02_run_experiment` | Raw-socket BB84 across the slice, collect + verify |
+| | 03 | `03_analysis` | Plots and tables from the results `02` recorded |
+| | 04 | `04_all_scenarios` | **Every** scenario (singles + distance/attenuation sweeps) with 4-way cross-validation; switch loss updated in place per point |
+| | 05 | `05_network_effects` | **Stress study**: classical latency/jitter/loss vs time-to-key |
+| `sequence/` | 01 | `01_emulator` | Distributed BB84, both channels raw L2 through the switch, timeline certificate |
+| | 02 | `02_scenarios` | Distance sweep of the distributed emulator vs the NetSquid reference |
+| | 03 | `03_entanglement_e91` | E91/BBM92 over two nodes, CHSH test, Cascade + PA |
+| `concepts/` | 01 | `01_eavesdropper` | Intercept-resend Eve: QBER vs tap fraction, the ~11% threshold |
+| | 02 | `02_reconciliation` | Cascade makes the two keys match bit-for-bit |
+| | 03 | `03_repeater` | Entanglement swapping across three real nodes |
+| | 04 | `04_qkd_security` | Finite-key bounds, authenticated channel, biased bases, live decoy |
+| | 05 | `05_distributed_computing` | A **gate** between two QPUs: teleport / non-local CNOT, and the cost of a lost correction |
+
+Tracks: **deploy** `fabric/01→02→04→03`; **learn QKD** `fabric/02` → `concepts/01→02→04`;
+**entanglement & compute** `sequence/03` → `concepts/03` → `concepts/05`.
 
 ### Install
 

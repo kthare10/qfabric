@@ -1704,6 +1704,138 @@ def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
     return a_res, b_res
 
 
+
+def run_sequence_dqc(slice_obj, *, num_gates=2000, primitive="telegate",
+                     fidelity=1.0, distance_km=1.0, attenuation=0.2,
+                     dropped=None, late=None, port=5100,
+                     bob_data_ip="10.10.1.2", venv=".venv-qne",
+                     auth_key=None, classical_transport="tcp",
+                     channel_delay="auto", time_authority=False):
+    """Run a distributed **gate** across the slice (ROADMAP Phase 6).
+
+    The same two-node shape as E91 -- alice hosts the register and is the control
+    node, bob is the target node and reaches his qubits by RPC -- but the pairs are
+    spent on computation instead of a key. What crosses the data-plane link is the
+    op stream and, crucially, the corrections: m1 in PLAN (A->B) and m2 in ACK
+    (B->A). Each side applies the value **as it arrived**, so ``dropped`` is a real
+    control and not a simulated one.
+
+    ``primitive`` is 'telegate' (non-local CNOT, 1 bit each way, the control stays
+    on alice) or 'teleport' (state transfer, 2 bits A->B). Each run measures both
+    Pauli channels, so it spends ``2 * num_gates`` pairs.
+
+    ``dropped`` ('m1'|'m2') withholds a correction permanently -- costs 50% on the
+    one channel that bit protects. ``late`` withholds it for the gate and folds it
+    into the recorded outcome afterwards (a tracked Pauli frame): the result comes
+    back clean, which is how the run shows that herald latency is a memory-time
+    cost rather than a fidelity cost. The two are mutually exclusive.
+
+    ``classical_transport``, ``channel_delay`` and ``time_authority`` behave exactly
+    as in :func:`run_sequence_e91`. Prereqs: slice up with data-plane IPs
+    (notebook fabric/01) and setup_sequence_runtime().
+    Returns (alice_result, bob_result) dicts.
+    """
+    import json as _json
+
+    if dropped is not None and late is not None:
+        raise ValueError("a correction bit is either dropped or late, not both")
+
+    alice = slice_obj.get_node("alice")
+    bob = slice_obj.get_node("bob")
+
+    alice_classical_args = bob_classical_args = ""
+    if classical_transport == "l2":
+        configure_switch(slice_obj, 0)
+        alice_iface = alice.get_interface(
+            network_name="net_alice_switch").get_device_name()
+        bob_iface = bob.get_interface(
+            network_name="net_switch_bob").get_device_name()
+        alice_mac = alice.get_interface(network_name="net_alice_switch").get_mac()
+        bob_mac = bob.get_interface(network_name="net_switch_bob").get_mac()
+        alice_dst_mac = slice_obj.get_node("switch").get_interface(
+            network_name="net_alice_switch").get_mac()
+        bob_dst_mac = slice_obj.get_node("switch").get_interface(
+            network_name="net_switch_bob").get_mac()
+        alice_classical_args = (f"--classical-transport l2 "
+                                f"--classical-iface {alice_iface} "
+                                f"--src-mac {alice_mac} --dst-mac {alice_dst_mac}")
+        bob_classical_args = (f"--classical-transport l2 "
+                              f"--classical-iface {bob_iface} "
+                              f"--src-mac {bob_mac} --dst-mac {bob_dst_mac}")
+        print(f"\n=== Running distributed {primitive} (L2 classical) ===")
+    else:
+        print(f"\n=== Running distributed {primitive} (no switch) ===")
+    print(f"  gates={num_gates}/channel w={fidelity} dist={distance_km}km "
+          f"dropped={dropped} late={late}")
+
+    for node in (alice, bob):
+        node.execute("sudo pkill -f qne_sequence.node_runner 2>/dev/null; "
+                     "sudo rm -f /tmp/dqc_*.log; sleep 1", quiet=True)
+
+    common = (f"--protocol dqc --dqc-primitive {primitive} "
+              f"--num-gates {num_gates} --fidelity {fidelity} "
+              f"--distance-km {distance_km} --attenuation {attenuation} "
+              f"--channel-delay {channel_delay} --port {port}")
+    if time_authority:
+        # dqc never free-runs (every step waits on a receive), so the shared
+        # logical clock is the whole mechanism -- no coordinator process.
+        common += " --time-authority logical:0"
+    if auth_key:
+        common += f" --auth-key {auth_key}"
+    if dropped:
+        common += f" --dqc-drop {dropped}"
+    if late:
+        common += f" --dqc-late {late}"
+
+    if classical_transport == "l2":
+        runner = (f"cd ~/qfabric/qne-sequence && sudo env PYTHONPATH=$HOME/qfabric "
+                  f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner")
+    else:
+        runner = (f"cd ~/qfabric/qne-sequence && env PYTHONPATH=$HOME/qfabric "
+                  f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.node_runner")
+
+    print("  Starting Bob (target node)...")
+    bob_thread = bob.execute_thread(
+        f"{runner} --role bob --name bob --peer alice --host 0.0.0.0 "
+        f"{bob_classical_args} {common} 2>&1 | tee /tmp/dqc_bob.log")
+    time.sleep(8)
+
+    print("  Starting Alice (control node + register)...")
+    alice_thread = alice.execute_thread(
+        f"{runner} --role alice --name alice --peer bob --host {bob_data_ip} "
+        f"{alice_classical_args} {common} 2>&1 | tee /tmp/dqc_alice.log")
+
+    a_out = alice_thread.result()
+    time.sleep(5)
+    try:
+        b_out = bob_thread.result()
+    except Exception as e:
+        b_out = ("", str(e))
+
+    def _parse(out):
+        for line in reversed(str(out[0]).splitlines()):
+            line = line.strip()
+            if line.startswith("{") and '"primitive"' in line:
+                try:
+                    return _json.loads(line)
+                except _json.JSONDecodeError:
+                    pass
+        return None
+
+    a_res, b_res = _parse(a_out), _parse(b_out)
+
+    print(f"\n=== Distributed {primitive} results ===")
+    for who, r in (("alice", a_res), ("bob", b_res)):
+        if r:
+            print(f"  [{who}] gates={r.get('gates_completed')} "
+                  f"bit_err={r.get('bit_error')} phase_err={r.get('phase_error')} "
+                  f"pred={r.get('error_pred')} pairs={r.get('pairs_consumed')} "
+                  f"bits={r.get('classical_bits')} "
+                  f"certified={r.get('lookahead', {}).get('certified')}")
+        else:
+            print(f"  [{who}] no JSON result -- check /tmp/dqc_{who}.log on the node")
+    return a_res, b_res
+
 def run_sequence_repeater(slice_obj, *, num_pairs=20000, fidelity=0.95,
                           distance_km=1.0, attenuation=0.2, chain_mode="bbm92",
                           sample_fraction=0.2, reconcile=True, cascade_passes=4,

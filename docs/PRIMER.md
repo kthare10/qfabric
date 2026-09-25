@@ -820,7 +820,7 @@ THE POINT: every arrow above leans on classical networking —
 
 ## 5.3 · Where to go from here
 
-- **See the concepts live:** notebooks `10` (watch Eve raise the QBER and kill
+- **See the concepts live:** notebooks `concepts/01` (watch Eve raise the QBER and kill
   the key rate), `09` (entanglement + a CHSH violation), `12` (a repeater chain,
   the f^L law, and what happens when heralds don't arrive), `13` (finite keys,
   authentication, decoy states — the §2.8 fine print, running).
