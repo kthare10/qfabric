@@ -191,29 +191,6 @@ def fig_throughput(rows):
     return fig
 
 
-def fig_network_effects(rows):
-    """Classical-channel netem sweep (FABRIC): QBER stays flat (TCP reliable) while
-    time-to-key / key-rate degrade. `rows` carry a `condition` label."""
-    import matplotlib.pyplot as plt
-    sel = [r for r in rows if r.get("condition") and r.get("key")]
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
-    if sel:
-        names = [r["condition"] for r in sel]
-        x = np.arange(len(names))
-        ax1.bar(x, [r.get("qber", 0) for r in sel], color="steelblue")
-        ax1.axhline(0.11, color="red", ls=":", alpha=0.6, label="11% threshold")
-        ax1.set_xticks(x); ax1.set_xticklabels(names, rotation=30, ha="right")
-        ax1.set(ylabel="QBER", title="QBER vs classical-channel condition")
-        _legend(ax1); ax1.grid(alpha=0.3, axis="y")
-        ax2.bar(x, [r.get("key_bits_per_s", 0) for r in sel], color="seagreen")
-        ax2.set_xticks(x); ax2.set_xticklabels(names, rotation=30, ha="right")
-        ax2.set(ylabel="secure key bits / second",
-                title="Key rate vs classical-channel condition")
-        ax2.grid(alpha=0.3, axis="y")
-    fig.tight_layout()
-    return fig
-
-
 _FIGS = {
     "qber_vs_fidelity": fig_qber_vs_fidelity,
     "secure_fraction": fig_secure_fraction,

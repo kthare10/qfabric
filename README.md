@@ -62,7 +62,6 @@ slice it builds.
 | | 02 | `02_run_experiment` | Raw-socket BB84 across the slice, collect + verify |
 | | 03 | `03_analysis` | Plots and tables from the results `02` recorded |
 | | 04 | `04_all_scenarios` | **Every** scenario (singles + distance/attenuation sweeps) with 4-way cross-validation; switch loss updated in place per point |
-| | 05 | `05_network_effects` | **Stress study**: classical latency/jitter/loss vs time-to-key |
 | `sequence/` | 01 | `01_emulator` | Distributed BB84, both channels raw L2 through the switch, timeline certificate |
 | | 02 | `02_scenarios` | Distance sweep of the distributed emulator vs the NetSquid reference |
 | | 03 | `03_entanglement_e91` | E91/BBM92 over two nodes, CHSH test, Cascade + PA |
