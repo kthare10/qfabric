@@ -49,7 +49,7 @@ stock BB84 *does* trip the guard; every run reports `remote_access_errors` (must
 
 Harnesses: `bench_throughput.py`, `sweep.py`, `plots.py`; they write `results/`, which is
 scratch — regenerate rather than expecting it in a fresh checkout.
-Tests: `tests/` (208, two-/three-/n-process loopback runs), run with `PYTHONPATH=.. pytest tests -q`.
+Tests: `tests/` — two-/three-/n-process loopback runs; `PYTHONPATH=.. pytest tests -q`.
 
 ## Running it
 

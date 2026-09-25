@@ -43,8 +43,8 @@ Enter these in the Artifact Manager UI (or via the REST API — fields below map
 > classical sifting over the data-plane link so genuine WAN latency/jitter enters the
 > protocol. A cross-validation framework runs the measured FABRIC result, a QFabric
 > simulation, SeQUeNCe 1.0, and NetSquid — each on its own slice node — and checks
-> statistical agreement on QBER and secure key rate. Fourteen notebooks — all of
-> which run on a slice — drive the whole thing on FABRIC: fabric/ (set up, run,
+> statistical agreement on QBER and secure key rate. A set of notebooks — all of
+> which run on a slice — drives the whole thing on FABRIC: fabric/ (set up, run,
 > analyse, sweep, network effects), sequence/ (the distributed runtime, E91) and
 > concepts/ (one capability each: eavesdropper, reconciliation, repeaters, security
 > depth, distributed computing). See README.md, docs/SPEC.md, docs/ROADMAP.md.

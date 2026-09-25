@@ -42,10 +42,10 @@ Two implementations share the physics and post-processing code (`qne/bb84.py`, `
 | `p4/` | BMv2 P4 program: per-wavelength fiber-loss drop for `0x7101`, lossless forwarding for `0x7102`, counters; PTF tests |
 | `scripts/` | `deploy_fabric.py` (slice, switch, runs, sweeps, cross-validation, netem, repeater bridge), `decoy_sweep.py`, env setup |
 | `validation/` | Platform-neutral scenarios + adapters for QFabric-sim, SeQUeNCe, NetSquid and the statistical agreement test |
-| `notebooks/` | All slice notebooks: `00_overview` → `fabric/` (01–05 deploy/run/analyse) → `sequence/` (01–03 distributed runtime) → `concepts/` (01–05 one capability each) |
+| `notebooks/` | All slice notebooks: `00_overview`, then `fabric/` (deploy, run, analyse), `sequence/` (distributed runtime) and `concepts/` (one capability each) |
 | `docker/` | Prebuilt BMv2 image (GHCR) |
 | `docs/` | All documentation: `PRIMER` → `CONCEPTS`, plus `SPEC`, `ASSUMPTIONS`, `ROADMAP`, release process, `reviews/`, `refs/` |
-| `tests/`, `qne-sequence/tests/` | 139 core + 208 distributed tests (physics-validated, run in CI) |
+| `tests/`, `qne-sequence/tests/` | Physics-validated unit tests + multi-process loopback runs; both suites run in CI (see Install for how to run them) |
 
 ## Quick Start
 

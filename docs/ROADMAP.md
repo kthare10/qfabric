@@ -26,7 +26,7 @@ QFabric runs **BB84 and entanglement-based QKD (E91/BBM92) end-to-end as distrib
 | **Emulation-fidelity program: lookahead delivery + clock sync (no PTP)** — every classical message delivered at exactly `t_send + delay` in shared clock terms (BB84 timeline path, E91, repeater chains, Cascade); per-run certificate (`lookahead.certified` — only meaningful with a nonzero modeled delay; `late_events == 0` alone is vacuous); unified distance knob (`--channel-delay auto` derives delay from the same L as loss); single-site slice default | ✅ 2026-07-15 |
 | **Both channels as raw L2 through the P4 switch** — classical channel off TCP onto raw EtherType `0x7102` (`--classical-transport l2`) with a reliable-datagram shim (`l2_link.ReliableLink`: seq/ack/timeout-resend/dedup + fragmentation, auth unchanged); P4 gains a `classical_channel_params` table + parser branch; P4 table-miss drop bug fixed; netem relocated to switch egress + matched by ethertype (stress only); interim orchestrator-seeded epoch (`--epoch-ns`) | ✅ live on the slice 2026-08-04 (BB84 + E91 runs with `classical_transport: l2`); the BB84 run's lookahead certificate FAILED (22/82 late at 245 µs modeled delay) — a clean certified run at nonzero delay is still to be recorded |
 | **Central time authority (global timeline)** — `qne_sequence.time_authority` + `ConservativeTimeline`: LBTS grants with lookahead = channel delay and in-flight message counting; `late_events == 0` by construction; `node_runner --time-authority`, `run_sequence_bb84(time_authority=True)` starts it on Bob's node | ✅ 2026-09-21/22 — **all three protocols, validated on a live slice.** BB84 (both channels raw L2): 374/376 frames checked, 0 late, certified; wall-clock control 406 late. E91 over raw L2: 220/221 checked, 0 late, certified, CHSH 2.742; wall-clock control 220 late (max 74 ms). Repeater chain on the slice: all 3 processes certified (0 late) vs 90/19/2 late under the wall clock, identical physics (3653 swaps, CHSH 2.616). Two mechanisms — LBTS grants where a node free-runs (BB84's protocol phase), one shared per-node logical clock everywhere else. Run artifacts and the write-up are in git history at `9692ae3` (`results/timeline_2026-09-21/`); run outputs are no longer tracked |
-| Tests: 139 core + 208 distributed, physics-validated; ruff-clean CI | ✅ |
+| Tests: physics-validated unit suite + multi-process distributed suite; ruff-clean CI | ✅ |
 
 ---
 
@@ -135,7 +135,7 @@ currencies the rest of the platform already measures.
     `bell_measure(data, epr_a)`: swapping *is* teleporting half a pair.
   - `telegate_cnot_send` / `_apply` / `_finish` — non-local CNOT, 1 pair + 1 bit each
     way, control stays put. This is the primitive a distributed compiler emits.
-- ✅ **Validated on both backends, shot for shot** (`tests/test_dqc.py`, 54 tests):
+- ✅ **Validated on both backends, shot for shot** (`tests/test_dqc.py`):
   exact transfer / truth table at w=1; telegate on |+⟩|0⟩ produces Φ+ (correlated in
   Z *and* X — coherent, not a classical copy); **error rate (1−w)/2 for teleport, and
   for the telegate's bit and phase channels alike — the same curve as the E91 QBER**;
@@ -162,7 +162,7 @@ currencies the rest of the platform already measures.
   work; the raw-L2 classical backend is selectable but not yet exercised on a slice.
   `deploy_fabric.run_sequence_dqc` and `notebooks/concepts/05_distributed_computing`
   drive it from a slice, but **neither has been run against FABRIC hardware yet**.
-  Validated in `tests/test_two_node_dqc.py` (15 tests, two processes over loopback):
+  Validated in `tests/test_two_node_dqc.py` (two processes over loopback):
   exact gate at w=1, (1−w)/2 at w=0.9 on both channels, each dropped bit breaking
   exactly the one channel it protects, every late bit recovered, loss costing gates
   rather than fidelity, and the run **certified on the global timeline** at a 100 km
