@@ -28,7 +28,7 @@ adapters — those (validation/run_sequence.py, validation/run_netsquid.py) driv
 the real SeQUeNCe and NetSquid engines so cross-validation reflects each
 simulator's own physics, not a re-implementation.
 
-Physics (matches SPEC.md):
+Physics (matches docs/SPEC.md):
     loss      P(loss) = 1 - 10^(-alpha * L / 10)
     QBER_mis  e = (1 - polarization_fidelity) / 2     (depolarizing misalignment)
     detector  efficiency eta, dark-count prob = rate * detection_window

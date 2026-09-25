@@ -13,7 +13,7 @@ unmodified, pinned dependency (`sequence==1.0.0`, Python 3.12).
 What is real and what is modeled: the classical/herald traffic is real (raw `0x7102`
 Ethernet through the BMv2 P4 switch, or TCP for dev); photons are `0x7101` frames dropped
 statistically by the switch; entangled pairs are Werner states in a numpy register on one
-node reached over RPC (`quantum_transport: entangled-state-service`). See `../ASSUMPTIONS.md`.
+node reached over RPC (`quantum_transport: entangled-state-service`). See `../docs/ASSUMPTIONS.md`.
 
 ## Why SeQUeNCe can't just be distributed — the three seams
 

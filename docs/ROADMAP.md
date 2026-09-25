@@ -8,7 +8,7 @@ Legend: ✅ done · 🟡 in progress / partial · ⬜ planned
 
 ## Status at a Glance
 
-QFabric runs **BB84 and entanglement-based QKD (E91/BBM92) end-to-end as distributed systems on a FABRIC slice** — including a **3-node entanglement-swapping chain with heralds over a live WAN segment** — with the full key-distillation pipeline (sift → Cascade → key verification → Toeplitz privacy amplification), a security-depth stack (finite-key, authenticated channel, decoy-state accounting, biased bases, detector realism), and cross-validation against the SeQUeNCe and NetSquid simulators. The quantum channel and the quantum states are *statistical models*; the classical/herald traffic is real. See `ASSUMPTIONS.md` and `docs/reviews/2026-09-21.md`.
+QFabric runs **BB84 and entanglement-based QKD (E91/BBM92) end-to-end as distributed systems on a FABRIC slice** — including a **3-node entanglement-swapping chain with heralds over a live WAN segment** — with the full key-distillation pipeline (sift → Cascade → key verification → Toeplitz privacy amplification), a security-depth stack (finite-key, authenticated channel, decoy-state accounting, biased bases, detector realism), and cross-validation against the SeQUeNCe and NetSquid simulators. The quantum channel and the quantum states are *statistical models*; the classical/herald traffic is real. See `ASSUMPTIONS.md` and `reviews/2026-09-21.md`.
 
 | Capability | Status |
 |------------|--------|
@@ -209,7 +209,7 @@ Priority order from the research plan:
 
 ## Known Limitations (today)
 
-*(Updated by the 2026-09-21 review — see `docs/reviews/2026-09-21.md` for what was fixed.)*
+*(Updated by the 2026-09-21 review — see `reviews/2026-09-21.md` for what was fixed.)*
 
 - The `qne/` hand-coded path models photons at the bit/basis level (no entanglement). Entanglement (E91/BBM92 + the repeater chain) lives in `qne-sequence/` on a shared multi-qubit **quantum-state service**: 2-node E91 and the 3-node swapped chain both run distributed and are validated on real FABRIC hardware. Chains with more than one repeater station (n-node) are the next extension.
 - QBER comes from a depolarizing polarization-misalignment model (≈ (1−F)/2) plus dark counts; `dead_time` and `timing_jitter` are now modeled in the detector (dead-time gating needs a pulse period / arrival times).

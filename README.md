@@ -2,7 +2,7 @@
 
 QFabric is a programmable quantum network emulation platform built on the [FABRIC testbed](https://fabric-testbed.net). It runs quantum-network protocols — BB84 QKD (with decoy-state accounting), entanglement-based QKD (E91/BBM92), entanglement-swapping repeater chains, and distributed quantum *computing* (teleportation and the non-local CNOT between two QPUs) — as **real distributed systems** on testbed nodes, with the *fiber* emulated in a P4/BMv2 data plane and cross-validated against the SeQUeNCe and NetSquid simulators.
 
-**What is emulated and what is real (read `ASSUMPTIONS.md` before quoting any number):**
+**What is emulated and what is real (read `docs/ASSUMPTIONS.md` before quoting any number):**
 
 | | Quantum channel | Classical channel | Quantum state |
 |---|---|---|---|
@@ -10,9 +10,9 @@ QFabric is a programmable quantum network emulation platform built on the [FABRI
 | Implemented as | P4 switch drops each frame with the Beer–Lambert fiber-loss probability | raw L2 through the **same** switch, reliable-datagram shim; TCP as a dev fallback | numpy Werner-state register on one node, reached by RPC |
 | Real? | statistical model of loss + depolarizing noise; **no photons, no quantum states on the wire** | real frames on real links | **no physical entanglement**; a correctness/distribution check, not a Bell test |
 
-The design bet: *the switch is the fiber*, carrying both "wavelengths". Slices are **single-site** by default — a photon cannot cross a WAN — and one distance knob (`--distance-km` / `--channel-delay auto`) drives both fiber loss and classical propagation delay (~5 µs/km). Cross-site slices and netem impairments are **stress studies**, not operating conditions: a real QKD classical channel has no loss and ~zero delay (SeQUeNCe-team feedback, 2026-07; see `ASSUMPTIONS.md`).
+The design bet: *the switch is the fiber*, carrying both "wavelengths". Slices are **single-site** by default — a photon cannot cross a WAN — and one distance knob (`--distance-km` / `--channel-delay auto`) drives both fiber loss and classical propagation delay (~5 µs/km). Cross-site slices and netem impairments are **stress studies**, not operating conditions: a real QKD classical channel has no loss and ~zero delay (SeQUeNCe-team feedback, 2026-07; see `docs/ASSUMPTIONS.md`).
 
-New to quantum networking? Start with [`PRIMER.md`](PRIMER.md) (concepts from zero, no code), then [`CONCEPTS.md`](CONCEPTS.md) (concept → code map). [`SPEC.md`](SPEC.md) has the wire formats and protocol messages, [`ASSUMPTIONS.md`](ASSUMPTIONS.md) the modeling assumptions, [`ROADMAP.md`](ROADMAP.md) status and open items, and [`docs/reviews/2026-09-21.md`](docs/reviews/2026-09-21.md) the latest code review with what was fixed and what remains. Release process and reference material live under [`docs/`](docs/).
+All documentation lives in [`docs/`](docs/). New to quantum networking? Start with [`docs/PRIMER.md`](docs/PRIMER.md) (concepts from zero, no code), then [`docs/CONCEPTS.md`](docs/CONCEPTS.md) (concept → code map). [`docs/SPEC.md`](docs/SPEC.md) has the wire formats and protocol messages, [`docs/ASSUMPTIONS.md`](docs/ASSUMPTIONS.md) the modeling assumptions, [`docs/ROADMAP.md`](docs/ROADMAP.md) status and open items, and [`docs/reviews/2026-09-21.md`](docs/reviews/2026-09-21.md) the latest code review.
 
 Repository: <https://github.com/kthare10/qfabric>
 
@@ -44,7 +44,7 @@ Two implementations share the physics and post-processing code (`qne/bb84.py`, `
 | `validation/` | Platform-neutral scenarios + adapters for QFabric-sim, SeQUeNCe, NetSquid and the statistical agreement test |
 | `notebooks/` | `00_overview` → `fabric/` (01–06 slice workflow) → `sequence/` (07–09 distributed runtime) → `concepts/` (10–13 teaching demos) |
 | `docker/` | Prebuilt BMv2 image (GHCR) |
-| `docs/` | Release process (`artifact-publishing.md`), code reviews (`reviews/`), transcribed references (`refs/`) |
+| `docs/` | All documentation: `PRIMER` → `CONCEPTS`, plus `SPEC`, `ASSUMPTIONS`, `ROADMAP`, release process, `reviews/`, `refs/` |
 | `tests/`, `qne-sequence/tests/` | 139 core + 208 distributed tests (physics-validated, run in CI) |
 
 ## Quick Start

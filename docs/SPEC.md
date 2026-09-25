@@ -2,7 +2,7 @@
 
 - **Status**: 2026-09-21 — reflects `qne/`, `qne-sequence/`, `p4/`, `validation/` as implemented
 - **Audience**: contributors, reviewers, anyone reproducing or extending the platform
-- **Companion docs**: [`README.md`](README.md) (usage), [`ASSUMPTIONS.md`](ASSUMPTIONS.md) (what is modeled), [`CONCEPTS.md`](CONCEPTS.md) (physics → code), [`ROADMAP.md`](ROADMAP.md) (status)
+- **Companion docs**: [`../README.md`](../README.md) (usage), [`ASSUMPTIONS.md`](ASSUMPTIONS.md) (what is modeled), [`CONCEPTS.md`](CONCEPTS.md) (physics → code), [`ROADMAP.md`](ROADMAP.md) (status)
 
 This document is deliberately limited to the things a second implementation would need to
 interoperate: frame layouts, P4 tables, the classical message sequence, and the key-rate
@@ -111,4 +111,4 @@ BB84: `QUBITS` (descriptor batches, `bulk` or `per_event`), `QUBITS_DONE`, `BASE
 
 ## 7. Scenario configuration
 
-`ScenarioConfig` (`qne/config.py`, nested YAML) — `channel{distance_km, attenuation_db_per_km, polarization_fidelity}`, `detector{efficiency, dark_count_rate (Hz), detection_window (s, default 1e-9), dead_time (ns), timing_jitter (ns)}`, `protocol{num_photons, send_rate_hz, sample_fraction, wavelength, basis_bias}`, `seed` (**`null` by default** — OS entropy; an integer makes the run reproducible and its key derivable). `ValidationScenario` (`validation/scenario.py`) is the flat, platform-neutral form accepted by every simulator adapter and supports `sweep:` files. Result schemas: `qne.metrics.ExperimentMetrics` (raw-socket path) and the `node_runner` JSON line (`qne-sequence/README.md`).
+`ScenarioConfig` (`qne/config.py`, nested YAML) — `channel{distance_km, attenuation_db_per_km, polarization_fidelity}`, `detector{efficiency, dark_count_rate (Hz), detection_window (s, default 1e-9), dead_time (ns), timing_jitter (ns)}`, `protocol{num_photons, send_rate_hz, sample_fraction, wavelength, basis_bias}`, `seed` (**`null` by default** — OS entropy; an integer makes the run reproducible and its key derivable). `ValidationScenario` (`validation/scenario.py`) is the flat, platform-neutral form accepted by every simulator adapter and supports `sweep:` files. Result schemas: `qne.metrics.ExperimentMetrics` (raw-socket path) and the `node_runner` JSON line (`../qne-sequence/README.md`).

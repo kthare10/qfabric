@@ -12,7 +12,7 @@
 > **actual traffic on the wire** instead of in-memory event scheduling.
 > **First target:** BB84 over 2 nodes (real SeQUeNCe `QKDNode`s), reusing QFabric's
 > existing photon wire format + P4 loss model.
-> **Companion docs:** [`../SPEC.md`](../SPEC.md), [`../ROADMAP.md`](../ROADMAP.md), [`../README.md`](../README.md)
+> **Companion docs:** [`../docs/SPEC.md`](../docs/SPEC.md), [`../docs/ROADMAP.md`](../docs/ROADMAP.md), [`../README.md`](../README.md)
 
 ---
 

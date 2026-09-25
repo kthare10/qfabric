@@ -42,7 +42,7 @@ Enter these in the Artifact Manager UI (or via the REST API — fields below map
 > simulation, SeQUeNCe 1.0, and NetSquid — each on its own slice node — and checks
 > statistical agreement on QBER and secure key rate. A linear notebook workflow
 > (overview → set up slice → run experiment → cross-validate → analysis → run-all-
-> scenarios) drives the whole thing on FABRIC. See README.md, SPEC.md, ROADMAP.md.
+> scenarios) drives the whole thing on FABRIC. See README.md, docs/SPEC.md, docs/ROADMAP.md.
 
 ### description_long — HTML (if the field renders HTML)
 
@@ -93,7 +93,7 @@ physics; unavailable backends are reported as SKIPPED, never a false pass.</p>
 <p><strong>License:</strong> Apache-2.0.
 <strong>Source:</strong>
 <a href="https://github.com/kthare10/qfabric">github.com/kthare10/qfabric</a>.
-See <code>README.md</code>, <code>SPEC.md</code>, and <code>ROADMAP.md</code>.</p>
+See <code>README.md</code>, <code>docs/SPEC.md</code>, and <code>docs/ROADMAP.md</code>.</p>
 ```
 
 ## 3. Upload
