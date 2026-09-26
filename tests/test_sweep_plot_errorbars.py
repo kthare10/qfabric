@@ -111,6 +111,25 @@ def test_measured_bar_is_wider_than_the_simulator_bar(plot_group):
     assert widths[0] > 2 * widths[1], f"measured bar not visibly wider: {widths}"
 
 
+@pytest.mark.parametrize("qber,n", [
+    (0.0, 167),     # lo = 4.3e-19, so qber - lo is negative by a rounding error
+    (1.0, 6),       # hi = 0.9999999999999999, so hi - qber is negative
+    (0.0, 39), (0.0, 1), (0.0, 2), (0.0, 1000),
+    (1.0, 1), (1.0, 39), (1.0, 167),
+])
+def test_endpoint_samples_never_produce_a_negative_bar(plot_group, qber, n):
+    """A QBER of exactly 0 or 1 must not crash the cell.
+
+    wilson_interval clamps to [0, 1], but floating point can still put the bound a
+    rounding error the wrong side of the estimate; matplotlib then raises
+    "'yerr' must not contain negative values" and the whole sweep fails to plot.
+    The n=39 case passes either way, which is why the first four tests missed this.
+    """
+    rows = [row(d, [backend("qfabric", qber, n)]) for d in (1, 50, 100)]
+    for lo, hi in bars(plot_group, rows):      # must not raise
+        assert hi >= lo
+
+
 def test_a_real_39_bit_point_from_the_recorded_sweep(plot_group):
     """distance_km=100 really did sample 39 bits; it must still plot with a bar."""
     rows = [row(1, [backend("qfabric", 0.01, 2504)]),
