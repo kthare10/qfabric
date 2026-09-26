@@ -311,6 +311,9 @@ def run_all_scenarios_on_fabric(slice_obj, scenarios_dir="validation/scenarios",
 
     results_dir = PROJECT_DIR / "results"
     tmp_dir = results_dir / "_tmp_scenarios"
+    # results/ is gitignored scratch; create it explicitly rather than relying on
+    # tmp_dir's parents=True to bring it into being as a side effect.
+    results_dir.mkdir(parents=True, exist_ok=True)
     tmp_dir.mkdir(parents=True, exist_ok=True)
     sdir = PROJECT_DIR / scenarios_dir
 
