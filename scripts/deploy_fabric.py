@@ -599,6 +599,47 @@ def configure_switch(slice_obj, threshold: int):
     return alice_mac, bob_mac, sw_alice_mac, sw_bob_mac, iface_alice, iface_bob
 
 
+def threshold_in_dump(dump: str, threshold: int) -> bool:
+    """Is ``threshold`` present in a BMv2 ``table_dump`` of quantum_channel_params?
+
+    Only the ``set_channel_params`` action line is searched — an entry handle or a
+    match key that happens to equal the threshold must not satisfy the check.
+
+    Token formats, per the cases pinned in tests/test_validation.py
+    (TestFabricLossUpdates), which are the only record we have of real CLI output:
+
+      * ``0x``/``0X``-prefixed  -> hexadecimal  ('0xabc', '0XABC', '0xffffffff')
+      * all digits              -> decimal      ('193273528', '0')
+      * contains a-f, no prefix -> hexadecimal  ('0b859b1b') — cannot be decimal
+
+    History, because this has now been wrong three ways and each cost a full sweep:
+      * ``int(token, 0)`` raised ValueError on a leading zero ('01'), so every
+        scenario point aborted before it was measured;
+      * reading unprefixed tokens as decimal discarded genuine hex like '0b859b1b';
+      * reading *everything* as hex broke the documented decimal form above.
+
+    Known ambiguity: an all-digit token with a leading zero ('01977450') is read as
+    decimal per the rule above. If a switch ever emits unprefixed hex in that shape
+    it would be misread; no such output is on record, and guessing both ways would
+    let a stale entry pass as correct, which is the worse failure.
+    """
+    action_data = re.findall(r"\bset_channel_params\b([^\r\n]*)", dump, re.IGNORECASE)
+    tokens = re.findall(r"\b(?:0[xX])?[0-9a-fA-F]+\b", "\n".join(action_data))
+    for tok in tokens:
+        try:
+            if tok[:2].lower() == "0x":
+                value = int(tok, 16)
+            elif tok.isdigit():
+                value = int(tok, 10)
+            else:
+                value = int(tok, 16)
+        except ValueError:
+            continue
+        if value == threshold:
+            return True
+    return False
+
+
 def set_channel_loss(slice_obj, threshold: int):
     """Update the P4 photon-loss threshold IN PLACE on the running BMv2 (no restart).
 
@@ -626,19 +667,7 @@ def set_channel_loss(slice_obj, threshold: int):
     # entry is stale/missing and the run would be silently wrong). Fail loudly instead.
     dump, _ = switch.execute(
         f'echo "table_dump quantum_channel_params" | {cli} --thrift-port 9090', quiet=True)
-    action_data = re.findall(r"\bset_channel_params\b([^\r\n]*)", dump, re.IGNORECASE)
-    tokens = re.findall(r"\b(?:0x[0-9a-f]+|[0-9]+)\b", "\n".join(action_data), re.IGNORECASE)
-
-    def _as_int(tok):
-        # NOT int(tok, 0): base 0 rejects a leading zero, so a dump token like '01'
-        # (the egress port, zero-padded fields) raised ValueError and aborted the
-        # whole sweep before any point was measured.
-        try:
-            return int(tok, 16) if tok.lower().startswith("0x") else int(tok, 10)
-        except ValueError:
-            return None
-
-    if not any(_as_int(token) == threshold for token in tokens):
+    if not threshold_in_dump(dump, threshold):
         raise RuntimeError(
             f"set_channel_loss: threshold {threshold} (0x{threshold:08x}) did not take — "
             f"is the entry present? Run configure_switch first (notebook 1). Dump:\n{dump}")
