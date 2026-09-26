@@ -628,7 +628,17 @@ def set_channel_loss(slice_obj, threshold: int):
         f'echo "table_dump quantum_channel_params" | {cli} --thrift-port 9090', quiet=True)
     action_data = re.findall(r"\bset_channel_params\b([^\r\n]*)", dump, re.IGNORECASE)
     tokens = re.findall(r"\b(?:0x[0-9a-f]+|[0-9]+)\b", "\n".join(action_data), re.IGNORECASE)
-    if not any(int(token, 0) == threshold for token in tokens):
+
+    def _as_int(tok):
+        # NOT int(tok, 0): base 0 rejects a leading zero, so a dump token like '01'
+        # (the egress port, zero-padded fields) raised ValueError and aborted the
+        # whole sweep before any point was measured.
+        try:
+            return int(tok, 16) if tok.lower().startswith("0x") else int(tok, 10)
+        except ValueError:
+            return None
+
+    if not any(_as_int(token) == threshold for token in tokens):
         raise RuntimeError(
             f"set_channel_loss: threshold {threshold} (0x{threshold:08x}) did not take — "
             f"is the entry present? Run configure_switch first (notebook 1). Dump:\n{dump}")

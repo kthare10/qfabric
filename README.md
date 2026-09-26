@@ -60,8 +60,8 @@ slice it builds.
 |---|---|----------|--------------|
 | `fabric/` | 01 | `01_setup_slice` | Provision the (single-site) slice, start BMv2, load the P4 tables |
 | | 02 | `02_run_experiment` | Raw-socket BB84 across the slice, collect + verify |
-| | 03 | `03_analysis` | Plots and tables from the results `02` recorded |
-| | 04 | `04_all_scenarios` | **Every** scenario (singles + distance/attenuation sweeps) with 4-way cross-validation; switch loss updated in place per point |
+| | 03 | `03_all_scenarios` | **Every** scenario (singles + distance/attenuation sweeps) with 4-way cross-validation; switch loss updated in place per point |
+| | 04 | `04_analysis` | Plots and tables from everything `02` and `03` recorded |
 | `sequence/` | 01 | `01_emulator` | Distributed BB84, both channels raw L2 through the switch, timeline certificate |
 | | 02 | `02_scenarios` | Distance sweep of the distributed emulator vs the NetSquid reference |
 | | 03 | `03_entanglement_e91` | E91/BBM92 over two nodes, CHSH test, Cascade + PA |
@@ -71,7 +71,7 @@ slice it builds.
 | | 04 | `04_qkd_security` | Finite-key bounds, authenticated channel, biased bases, live decoy |
 | | 05 | `05_distributed_computing` | A **gate** between two QPUs: teleport / non-local CNOT, and the cost of a lost correction |
 
-Tracks: **deploy** `fabric/01→02→04→03`; **learn QKD** `fabric/02` → `concepts/01→02→04`;
+Tracks: **deploy** `fabric/01→02→03→04`; **learn QKD** `fabric/02` → `concepts/01→02→04`;
 **entanglement & compute** `sequence/03` → `concepts/03` → `concepts/05`.
 
 ### Install

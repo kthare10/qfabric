@@ -45,7 +45,7 @@ QFabric runs **BB84 and entanglement-based QKD (E91/BBM92) end-to-end as distrib
   Propagation delay stays on netem at the switch egress (BMv2 can't hold a packet) or
   the model-layer timeline. Open: the loss table is direction-blind and the counters are
   never read back (see Known Limitations).
-- ⬜ Sweep figures (QBER + key rate vs distance/attenuation). The `paper/` generator was removed on 2026-09-25; `notebooks/fabric/04_all_scenarios` produces the sweep on a slice and `fabric/03_analysis` plots it. Validate measured drop rate vs analytical once a clean FABRIC sweep dataset is recorded.
+- ⬜ Sweep figures (QBER + key rate vs distance/attenuation). The `paper/` generator was removed on 2026-09-25; `notebooks/fabric/03_all_scenarios` produces the sweep on a slice and `fabric/04_analysis` plots it. Validate measured drop rate vs analytical once a clean FABRIC sweep dataset is recorded.
 - ⬜ **Timing jitter injection** in the data plane and validation against detector specs.
 - ⬜ **Throughput benchmark**: sustainable photon rate / P4 processing overhead.
 - ⬜ Port the model from BMv2 to **Tofino / DPDK SmartNIC** for finer timing control.
@@ -223,7 +223,7 @@ Priority order from the research plan:
 - Decoy-state runs live on the TCP-descriptor transport only, with per-photon fiber thinning at the source (`loss_where = none`) — the P4 switch is **bypassed**. The raw 0x7101 frame has no photon-count field yet. **Decoy has never run through the emulated fiber**, and there is no PNS Eve; treat decoy as source-realism + honest accounting.
 - P4 loss table is direction-blind (keyed on wavelength only; the single entry hard-codes egress port 1) — fine while photons flow Alice→Bob only. P4 counters are never read back, so the switch's own drop count has not been compared with the table threshold on a live run.
 - Cross-validation backends do not share every assumption: the SeQUeNCe adapter ignores `num_photons`/`sample_fraction` and uses a weak-coherent μ = 0.1 source; `detection_window` is not a scenario field.
-- No measured distance curve is on record. The 2026-07-03 sweep was frozen by the switch-loss bug; that is fixed, but run outputs are no longer tracked (2026-09-25) so the curve must be re-recorded on a slice via `notebooks/fabric/04_all_scenarios`.
+- No measured distance curve is on record. The 2026-07-03 sweep was frozen by the switch-loss bug; that is fixed, but run outputs are no longer tracked (2026-09-25) so the curve must be re-recorded on a slice via `notebooks/fabric/03_all_scenarios`.
 - Memoryless per-packet loss — no burst loss or correlated fading.
 - Single wavelength, single link per run.
 - P4 and Python RNGs are independent — reproducibility holds within a backend, not bit-for-bit across the P4 and Python paths.
