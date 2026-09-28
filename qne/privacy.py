@@ -46,6 +46,15 @@ def toeplitz_amplify(key_bits, out_len: int, seed: int) -> list[int]:
 
     Returns:
         The extracted secret key as a list of 0/1 ints (length ``out_len``).
+
+    The matrix is never materialised. A Toeplitz product is a linear convolution:
+    with ``c`` the m+n−1 diagonal bits, ``y[i] = Σ_j c[i − j + n − 1]·key[j]`` is
+    ``convolve(c, key)[n−1 : n−1+m]``, computed here with an FFT in O((m+n) log(m+n))
+    time and O(m+n) memory. The dense m×n int64 matrix this replaces (plus its index
+    array) was ~12 GB at n ≈ 38k sifted bits — a 1 km, 100k-photon run — and got both
+    Alice and Bob OOM-killed on 8 GB FABRIC VMs (2026-09-28). Integer sums stay far
+    below 2⁵³, so rounding the FFT result is exact and the output is bit-identical
+    to the dense product.
     """
     n = len(key_bits)
     m = max(0, min(int(out_len), n))
@@ -54,6 +63,24 @@ def toeplitz_amplify(key_bits, out_len: int, seed: int) -> list[int]:
     rng = np.random.default_rng(seed)
     # A Toeplitz matrix is constant along diagonals, so m+n-1 random bits define it:
     #   T[i, j] = diag[i - j + (n - 1)]
+    diag = rng.integers(0, 2, size=m + n - 1, dtype=np.int64)
+    key = np.asarray(key_bits, dtype=np.int64) & 1
+    length = int(2 ** np.ceil(np.log2(len(diag) + n - 1)))
+    conv = np.fft.irfft(np.fft.rfft(diag.astype(np.float64), length)
+                        * np.fft.rfft(key.astype(np.float64), length), length)
+    y = np.rint(conv[n - 1:n - 1 + m]).astype(np.int64)
+    return (y & 1).astype(int).tolist()
+
+
+def toeplitz_amplify_dense(key_bits, out_len: int, seed: int) -> list[int]:
+    """Reference implementation that builds the m×n matrix explicitly. O(m·n)
+    memory — only for tests and small inputs; ``toeplitz_amplify`` must agree with
+    it bit for bit."""
+    n = len(key_bits)
+    m = max(0, min(int(out_len), n))
+    if m == 0 or n == 0:
+        return []
+    rng = np.random.default_rng(seed)
     diag = rng.integers(0, 2, size=m + n - 1, dtype=np.int64)
     idx = (np.arange(m)[:, None] - np.arange(n)[None, :]) + (n - 1)
     T = diag[idx]                                   # m x n over GF(2)

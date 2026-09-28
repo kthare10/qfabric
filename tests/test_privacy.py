@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from qne.privacy import toeplitz_amplify
+from qne.privacy import toeplitz_amplify, toeplitz_amplify_dense
 
 
 def _key(n, seed=0):
@@ -60,3 +60,27 @@ def test_edge_cases():
     assert toeplitz_amplify(_key(100), 0, seed=1) == []
     assert toeplitz_amplify([], 10, seed=1) == []
     assert set(toeplitz_amplify(_key(500), 200, seed=1)) <= {0, 1}
+
+
+def test_fft_hash_is_bit_identical_to_the_dense_matrix():
+    """The matrix-free hash must be the SAME 2-universal hash as the dense product
+    (same seed -> same diagonal bits -> same output), for odd sizes and edges too."""
+    for n, m, seed in [(1, 1, 0), (2, 1, 1), (7, 3, 2), (64, 64, 3), (1000, 400, 4),
+                       (1001, 999, 5), (3000, 1200, 99), (4097, 2048, 6)]:
+        k = _key(n, seed=seed + 100)
+        assert toeplitz_amplify(k, m, seed=seed) == toeplitz_amplify_dense(k, m, seed=seed), (n, m)
+
+
+def test_large_sifted_key_does_not_need_a_dense_matrix():
+    """A 1 km, 100k-photon slice run hands ~38k sifted bits to PA; the dense matrix
+    (~12 GB) OOM-killed both nodes on 2026-09-28. Must run in well under a second
+    with O(n) memory."""
+    import time
+    k = _key(38000, seed=11)
+    t0 = time.perf_counter()
+    out = toeplitz_amplify(k, 20000, seed=12)
+    assert len(out) == 20000 and set(out) <= {0, 1}
+    assert time.perf_counter() - t0 < 2.0
+    # still balanced and seed-sensitive at this size
+    assert abs(sum(out) / len(out) - 0.5) < 0.02
+    assert toeplitz_amplify(k, 20000, seed=13) != out
