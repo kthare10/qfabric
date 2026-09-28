@@ -29,8 +29,8 @@ Enter these in the Artifact Manager UI (or via the REST API — fields below map
 | `description_short` (≤255) | `Fiber emulated in a P4/BMv2 data plane; BB84, decoy-state BB84, E91/BBM92 and entanglement swapping as distributed processes on FABRIC, cross-validated against SeQUeNCe & NetSquid.` |
 | `description_long` (required, ≤5000) | See below |
 | `authors` (required) | Komal Thareja — RENCI, UNC Chapel Hill — kthare10@renci.org (+ FABRIC author UUID) |
-| `tags` (required) | `quantum-networking`, `qkd`, `bb84`, `e91`, `entanglement-swapping`, `decoy-states`, `p4`, `bmv2`, `emulation`, `sequence`, `netsquid` |
-| `visibility` | `project` first; switch to `public` when ready (`author` \| `project` \| `public`) |
+| `tags` (required) | From the Artifact Manager's fixed vocabulary (`GET /api/meta/tags`): `experiment`, `reproducible research`, `education`. Free-form tags such as `qkd` or `p4` are rejected with a 400. |
+| `visibility` | `public` (the artifact `bb8facbe-2c99-40b4-bbf1-034e4b03df5d` is public; keep it so on updates) |
 | `project_uuid` | your FABRIC project UUID |
 
 ### description_long — plain / markdown (paste into the form)
