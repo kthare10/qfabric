@@ -90,25 +90,29 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
     #   auto   -> model for tcp, switch for raw (conventional default; unchanged)
     loss_where = ("model" if quantum_transport == "tcp" else "switch") if loss == "auto" else loss
 
-    # Decoy-state source: fiber loss is folded into the per-photon binomial
-    # thinning at the source (the descriptor carries the SURVIVING photon count),
-    # so the channel itself must not drop descriptors — a lost descriptor would be
-    # double-counted loss AND wreck the vacuum gain (empty pulses still dark-count).
+    # Decoy-state source (Poisson photon numbers per pulse, three intensities).
+    #   tcp  -> fiber loss is folded into per-photon binomial thinning AT THE SOURCE
+    #           (the descriptor carries the surviving count), so the channel itself
+    #           must not drop descriptors: a lost descriptor would double-count loss
+    #           AND wreck the vacuum gain (empty pulses still dark-count).
+    #   raw  -> the pulse's photon count rides in the 0x7101 frame and the fiber is
+    #           applied downstream, per photon: by the BMv2 P4 switch (loss=switch)
+    #           or by the channel's software model (loss=model). Slots that never
+    #           reach Bob are dark-counted there (distributed_qkd).
     decoy_cfg = None
     if decoy:
-        if quantum_transport != "tcp":
-            raise ValueError("--decoy requires --quantum-transport tcp "
-                             "(the 0x7101 frame has no photon-count field yet)")
         probs = [float(x) for x in decoy_probs.split(",")]
         if len(probs) != 3 or abs(sum(probs) - 1.0) > 1e-9:
             raise ValueError(f"--decoy-probs needs 3 values summing to 1, got {decoy_probs}")
-        p_loss = loss_probability(distance_km, attenuation) if loss_where == "model" else 0.0
+        source_thins = quantum_transport == "tcp" and loss_where == "model"
         decoy_cfg = {
             "intensities": {"signal": mu_signal, "decoy": mu_decoy, "vacuum": mu_vacuum},
             "probs": probs,
-            "loss_probability": p_loss,
+            "loss_probability": (loss_probability(distance_km, attenuation)
+                                 if source_thins else 0.0),
         }
-        loss_where = "none"     # channel stays lossless; thinning already applied
+        if quantum_transport == "tcp":
+            loss_where = "none"     # descriptors must not be dropped (see above)
 
     # Timeline: wall-clock paced (default) or driven by the central time authority
     # (conservative synchronization -- see time_authority.py). The authority
@@ -387,9 +391,11 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         "photons_emitted": result.get("photons_emitted"),
         "elapsed_s": result.get("elapsed_s"),
         "photons_per_s": result.get("photons_per_s"),
-        "loss_probability": (decoy_cfg["loss_probability"] if decoy_cfg else
-                             0.0 if loss_where == "none" else
-                             loss_probability(distance_km, attenuation)),
+        # tcp decoy folds the fiber into source thinning (loss_where forced to
+        # "none"); every other mode reports the channel's own loss model.
+        "loss_probability": (decoy_cfg["loss_probability"] if (decoy_cfg and loss_where == "none")
+                             else 0.0 if loss_where == "none"
+                             else loss_probability(distance_km, attenuation)),
         "decoy": result.get("decoy"),
         "eve_fraction": eve_fraction,
         "eve_photons_intercepted": result.get("eve_photons_intercepted"),
@@ -519,7 +525,9 @@ def main(argv=None) -> int:
     ap.add_argument("--decoy", action="store_true",
                     help="decoy-state source on the live transport: Poisson(mu) "
                          "photons per pulse at 3 intensities, measured gains/QBERs "
-                         "feed the Ma-Qi-Zhao-Lo/GLLP analysis (key from signal pulses)")
+                         "feed the Ma-Qi-Zhao-Lo/GLLP analysis (key from signal pulses). "
+                         "On --quantum-transport raw the photon count rides in the "
+                         "0x7101 frame and the P4 switch thins it per photon.")
     ap.add_argument("--mu-signal", type=float, default=0.6)
     ap.add_argument("--mu-decoy", type=float, default=0.1)
     ap.add_argument("--mu-vacuum", type=float, default=0.001)

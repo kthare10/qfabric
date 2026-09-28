@@ -24,8 +24,9 @@
  *
  * The loss probability is pre-computed as a 32-bit threshold and
  * installed in a match-action table keyed by wavelength. At runtime,
- * each photon packet generates a random 32-bit number; if the random
- * value is less than the threshold, the photon is dropped.
+ * each photon in a pulse frame draws a random 32-bit number; a draw below
+ * the threshold loses that photon. A frame whose every photon is lost is
+ * dropped; otherwise it is forwarded carrying the surviving photon count.
  *
  * Non-photon traffic (e.g., classical BB84 sifting) is forwarded
  * via a standard L2 forwarding table.
@@ -146,18 +147,64 @@ control PhotonIngress(
              * overwriting egress_spec to port 0 and forwarding an
              * unknown-wavelength photon instead of dropping it. */
             if (quantum_channel_params.apply().hit) {
-                /* Generate random number for drop decision */
-                random(meta.random_value, (bit<32>)0, (bit<32>)0xFFFFFFFF);
-
-                /* Count all photon packets */
+                /* Count all photon frames (one frame = one pulse) */
                 photon_tx_counter.count((bit<32>)hdr.photon.wavelength);
 
-                if (meta.random_value < meta.loss_threshold) {
-                    /* Photon lost in fiber */
+                /* Thin the pulse photon by photon: each of the n photons in the
+                 * pulse survives the fiber independently with probability
+                 * 1 - P(loss), i.e. draw < threshold means that photon is lost.
+                 * A plain BB84 frame carries n = 1 (legacy frames write 0),
+                 * so this reduces to the single random draw of the original
+                 * loss model. The loop is unrolled to MAX_PHOTON_COUNT. */
+                meta.photon_count = hdr.photon.photon_count;
+                if (meta.photon_count == 0) {
+                    meta.photon_count = 1;
+                }
+                if (meta.photon_count > MAX_PHOTON_COUNT) {
+                    meta.photon_count = MAX_PHOTON_COUNT;
+                }
+                meta.survivors = 0;
+                random(meta.random_value, (bit<32>)0, (bit<32>)0xFFFFFFFF);
+                if (meta.photon_count >= 1 && meta.random_value >= meta.loss_threshold) {
+                    meta.survivors = meta.survivors + 1;
+                }
+                random(meta.random_value, (bit<32>)0, (bit<32>)0xFFFFFFFF);
+                if (meta.photon_count >= 2 && meta.random_value >= meta.loss_threshold) {
+                    meta.survivors = meta.survivors + 1;
+                }
+                random(meta.random_value, (bit<32>)0, (bit<32>)0xFFFFFFFF);
+                if (meta.photon_count >= 3 && meta.random_value >= meta.loss_threshold) {
+                    meta.survivors = meta.survivors + 1;
+                }
+                random(meta.random_value, (bit<32>)0, (bit<32>)0xFFFFFFFF);
+                if (meta.photon_count >= 4 && meta.random_value >= meta.loss_threshold) {
+                    meta.survivors = meta.survivors + 1;
+                }
+                random(meta.random_value, (bit<32>)0, (bit<32>)0xFFFFFFFF);
+                if (meta.photon_count >= 5 && meta.random_value >= meta.loss_threshold) {
+                    meta.survivors = meta.survivors + 1;
+                }
+                random(meta.random_value, (bit<32>)0, (bit<32>)0xFFFFFFFF);
+                if (meta.photon_count >= 6 && meta.random_value >= meta.loss_threshold) {
+                    meta.survivors = meta.survivors + 1;
+                }
+                random(meta.random_value, (bit<32>)0, (bit<32>)0xFFFFFFFF);
+                if (meta.photon_count >= 7 && meta.random_value >= meta.loss_threshold) {
+                    meta.survivors = meta.survivors + 1;
+                }
+                random(meta.random_value, (bit<32>)0, (bit<32>)0xFFFFFFFF);
+                if (meta.photon_count >= 8 && meta.random_value >= meta.loss_threshold) {
+                    meta.survivors = meta.survivors + 1;
+                }
+
+                if (meta.survivors == 0) {
+                    /* Every photon of the pulse lost in fiber */
                     photon_drop_counter.count((bit<32>)hdr.photon.wavelength);
                     mark_to_drop(standard_metadata);
                 } else {
-                    /* Photon survives — forward to detector (Bob) */
+                    /* Pulse survives (with the surviving photon count) —
+                     * forward to detector (Bob) */
+                    hdr.photon.photon_count = meta.survivors;
                     standard_metadata.egress_spec = meta.egress_port;
                     hdr.ethernet.src_addr = meta.egress_src_mac;
                     hdr.ethernet.dst_addr = meta.egress_dst_mac;

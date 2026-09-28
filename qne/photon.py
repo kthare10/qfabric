@@ -19,6 +19,11 @@
 
 Custom EtherType 0x7101 photon frames for P4 quantum channel emulation.
 Photon header is 17 bytes after the 14-byte Ethernet header.
+
+The last header byte is the pulse's photon count (a weak-coherent source emits
+Poisson(mu) photons per pulse). Legacy frames wrote 0 there; 0 and 1 both mean a
+single photon. The P4 switch thins the count per photon and forwards the survivor
+count, so a decoy-state run can ride the same 0x7101 path as plain BB84.
 """
 
 from __future__ import annotations
@@ -34,6 +39,8 @@ PHOTON_VERSION = 0x01
 ETHERNET_HDR_LEN = 14
 PHOTON_HDR_LEN = 17
 PHOTON_HDR_FORMAT = "!4B3IB"
+# Largest photon count the frame (and the P4 program's unrolled thinning) carries.
+MAX_PHOTON_COUNT = 8
 
 
 class Basis(IntEnum):
@@ -59,6 +66,9 @@ class PhotonPacket:
         wavelength: Channel tag for future WDM support.
         timestamp_hi: Upper 32 bits of TX timestamp (picoseconds).
         timestamp_lo: Lower 32 bits of TX timestamp (picoseconds).
+        photon_count: Photons in this pulse (1 for an ideal single-photon source;
+            a decoy-state source sends Poisson(mu) counts). Capped at
+            MAX_PHOTON_COUNT on the wire; 0 on the wire is read as 1.
         version: Protocol version.
     """
     basis: int
@@ -67,6 +77,7 @@ class PhotonPacket:
     wavelength: int = 0
     timestamp_hi: int = 0
     timestamp_lo: int = 0
+    photon_count: int = 1
     version: int = PHOTON_VERSION
 
     @property
@@ -85,7 +96,7 @@ class PhotonPacket:
             self.sequence_num,
             self.timestamp_hi,
             self.timestamp_lo,
-            0,  # padding
+            max(1, min(int(self.photon_count), MAX_PHOTON_COUNT)),
         )
 
     @classmethod
@@ -93,7 +104,7 @@ class PhotonPacket:
         """Deserialize a photon header from 17 bytes."""
         if len(data) < PHOTON_HDR_LEN:
             raise ValueError(f"Need at least {PHOTON_HDR_LEN} bytes, got {len(data)}")
-        version, basis, state, wavelength, seq, ts_hi, ts_lo, _pad = struct.unpack(
+        version, basis, state, wavelength, seq, ts_hi, ts_lo, count = struct.unpack(
             PHOTON_HDR_FORMAT, data[:PHOTON_HDR_LEN]
         )
         return cls(
@@ -104,6 +115,7 @@ class PhotonPacket:
             sequence_num=seq,
             timestamp_hi=ts_hi,
             timestamp_lo=ts_lo,
+            photon_count=count if count > 0 else 1,   # legacy padding byte = 1 photon
         )
 
     def to_ethernet_frame(

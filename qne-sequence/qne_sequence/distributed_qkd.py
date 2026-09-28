@@ -104,6 +104,12 @@ class DistributedBB84(BB84):
         self.final_keys: list[int] = []
         self.metrics: dict = {}
         self._bob_records: dict[int, tuple[int, int]] = {}  # seq -> (basis, bit)
+        self._bob_seen: set[int] = set()   # every slot whose pulse reached the detector
+        # dead-time runs: arrived pulses wait here and are detected in slot order
+        # together with the never-arrived slots (see _finalize_detections)
+        self._bob_pending: dict[int, tuple[int, int, int | None]] = {}
+        self._bob_duplicates = 0       # repeated sequence numbers ignored (one slot, one pulse)
+        self._bob_out_of_range = 0     # detections beyond the announced train, discarded
         self._bob_key_order: list[int] = []
         self._bob_sifted_count = 0
         self._bob_num_sampled = 0
@@ -192,9 +198,14 @@ class DistributedBB84(BB84):
         """Build the wire descriptors for one pulse train (BulkStream hook).
 
         Standard mode: [seq, basis, bit]. Decoy mode: [seq, basis, bit, n] where
-        n is the photon count that SURVIVES the fiber — the source draws
-        Poisson(μ_class) photons and the channel thins them Binomial(n, 1−loss).
-        Every pulse ships (even n = 0): an empty slot can still dark-count.
+        the source draws n ~ Poisson(μ_class) photons per pulse. With
+        ``loss_probability`` set (TCP descriptor transport) the fiber is applied
+        HERE, Binomial(n, 1−loss), and every pulse ships (even n = 0: an empty
+        slot can still dark-count). With ``loss_probability = 0`` the channel
+        owns the loss: the raw 0x7101 path puts n in the frame's photon-count
+        byte and the P4 switch (or the channel's software model) thins it per
+        photon; slots that never reach Bob are dark-counted in
+        ``_finalize_detections``.
         """
         num = len(basis_list)
         if self.decoy is None:
@@ -243,15 +254,88 @@ class DistributedBB84(BB84):
         # sifting, so a wrong-basis interception surfaces as a bit error.
         if self.eavesdropper is not None:
             pulses = self.eavesdropper.intercept_pulses(pulses)
+        defer = self.detector.dead_time > 0
         for seq, a_basis, a_bit, *rest in pulses:
-            photon = types.SimpleNamespace(basis=int(a_basis), state=int(a_bit),
-                                           sequence_num=int(seq))
-            if rest:                      # decoy descriptor: surviving photon count
-                ev = self.detector.detect_pulse(photon, int(rest[0]))
-            else:
-                ev = self.detector.detect(photon)
+            seq = int(seq)
+            if seq < 0 or seq in self._bob_seen:
+                # one slot carries one pulse: a repeated (or malformed) sequence
+                # number must not re-roll the detector or overwrite a record
+                self._bob_duplicates += 1
+                continue
+            self._bob_seen.add(seq)
+            n = int(rest[0]) if rest else None   # decoy descriptor: surviving photon count
+            if defer:
+                # Dead time couples consecutive slots, so detection must run in
+                # slot order — including the slots whose photon never arrives,
+                # which are only known once the train length is. Park the pulse;
+                # _finalize_detections replays everything in order.
+                self._bob_pending[seq] = (int(a_basis), int(a_bit), n)
+                continue
+            ev = self._detect_slot(seq, int(a_basis), int(a_bit), n)
             if ev.detected:
-                self._bob_records[int(seq)] = (int(ev.basis), int(ev.bit_value))
+                self._bob_records[seq] = (int(ev.basis), int(ev.bit_value))
+
+    def _detect_slot(self, seq: int, basis: int, bit: int, n_photons: int | None):
+        """Run the detector model on one slot: a plain photon, a decoy pulse of
+        ``n_photons`` survivors, or (``n_photons = 0``) an empty slot that can only
+        dark-count."""
+        photon = types.SimpleNamespace(basis=basis, state=bit, sequence_num=seq)
+        if n_photons is None:
+            return self.detector.detect(photon)
+        return self.detector.detect_pulse(photon, n_photons)
+
+    def _finalize_detections(self, num_slots: int) -> None:
+        """Bob: complete the detection record once the train length is known.
+
+        Two jobs, both about slots the photon path never delivered:
+
+        * **Dark counts on never-arrived slots.** On the raw 0x7101 path (and the
+          TCP path's software loss) a lost or empty pulse never reaches Bob, yet a
+          real detector is gated in every slot and can still click. Without this
+          the emulator under-counts dark counts exactly where they dominate (long
+          fiber, vacuum decoys) — the fix ``qne/bob.py`` carries for the raw-socket
+          path (review C6, 2026-09-21). Only slots that never reached the detector
+          are drawn; a pulse that arrived and did not click (or shipped as an
+          explicit n = 0 descriptor on the TCP decoy path) already had its dark
+          draw and must not get a second one.
+        * **Dead-time ordering.** Dead time couples neighbouring slots, so when it
+          is modeled every slot — arrived or not — is detected here in slot order
+          (arrived pulses were parked in ``_bob_pending``). The detector's own
+          horizon then gates each slot by the click that truly preceded it, and a
+          dark click on an empty slot blinds the slots after it exactly as a real
+          click would. Without dead time, order is irrelevant and arrived pulses
+          were detected on arrival.
+
+        The train is exactly ``num_slots`` long (the length of Alice's basis
+        list). Pulses whose sequence number lies outside it — a stray or corrupt
+        frame — are discarded and counted, never detected or dark-filled, so a
+        garbage sequence number can neither stall this loop nor inflate the
+        detection count that the sift ratio and the decoy gains divide by.
+        """
+        det = self.detector
+        if det is None:
+            return
+        pending = self._bob_pending
+        self._bob_pending = {}
+        # every pulse that reached the detector is in _bob_seen (detected or not,
+        # parked or not), so that is the set to count strays from
+        stray = [q for q in self._bob_seen if q >= num_slots]
+        for q in stray:
+            pending.pop(q, None)
+            self._bob_records.pop(q, None)
+        self._bob_out_of_range += len(stray)
+        if not pending and det.dark_count_prob <= 0.0:
+            return
+        for seq in range(num_slots):
+            if seq in pending:
+                basis, bit, n = pending[seq]
+                ev = self._detect_slot(seq, basis, bit, n)
+            elif seq in self._bob_seen or det.dark_count_prob <= 0.0:
+                continue                          # already drawn on arrival / no darks
+            else:
+                ev = self._detect_slot(seq, 0, 0, 0)  # never arrived: dark draw only
+            if ev.detected:
+                self._bob_records[seq] = (int(ev.basis), int(ev.bit_value))
 
     # -- classical control plane -----------------------------------------------
 
@@ -270,6 +354,10 @@ class DistributedBB84(BB84):
             self.bit_lists = []
             self.key_bits = []
             self._bob_records = {}
+            self._bob_seen = set()
+            self._bob_pending = {}
+            self._bob_duplicates = 0
+            self._bob_out_of_range = 0
             self.working = True
             # Bob now accumulates photons (receive_qubits) until QUBITS_DONE.
             # Replay any photons that beat this BEGIN over the raw path.
@@ -297,6 +385,10 @@ class DistributedBB84(BB84):
 
         elif t == "BASIS_LIST":                  # current node is Bob: sift + sample
             alice_bases = msg.payload["bases"]
+            # detections are locked in before the bases are used; the slots whose
+            # photon never came still get their (basis-independent) dark draw, and
+            # dead-time runs are replayed in slot order here
+            self._finalize_detections(len(alice_bases))
             matching = sorted(
                 seq for seq, (bb, _bit) in self._bob_records.items()
                 if seq < len(alice_bases) and bb == alice_bases[seq]
@@ -470,6 +562,8 @@ class DistributedBB84(BB84):
                             "sift_ratio": (self._bob_sifted_count / detected
                                            if detected else None),
                             "num_sampled": self._bob_num_sampled,
+                            "duplicate_pulses": self._bob_duplicates,
+                            "out_of_range_pulses": self._bob_out_of_range,
                             "key_bits": len(self._bob_key_order),
                             "secure_fraction": secure_fraction,
                             "final_key_bits": int(len(self._bob_key_order) * secure_fraction),

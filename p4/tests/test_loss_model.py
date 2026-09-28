@@ -19,7 +19,10 @@
 
 Sends 10K photon packets through BMv2 and verifies that the drop rate
 matches the installed loss threshold within 2 standard deviations. Also
-checks that EtherType 0x7102 classical frames are forwarded without loss.
+checks that EtherType 0x7102 classical frames are forwarded without loss,
+and that a multi-photon (decoy-state) pulse frame is thinned photon by
+photon: forwarded iff at least one photon survives, carrying the survivor
+count. (`bmv2_multiphoton_check.py` is the same check without PTF.)
 
 Requires: PTF (pip install ptf), BMv2 running with veth topology, and
 simple_switch_CLI on PATH to read the installed wavelength-0 threshold.
@@ -42,8 +45,8 @@ ALICE_MAC = "02:00:00:00:00:01"
 BOB_MAC = "02:00:00:00:00:02"
 
 
-def build_photon_frame(seq_num, basis=0, state=0, wavelength=0):
-    """Build a raw photon Ethernet frame."""
+def build_photon_frame(seq_num, basis=0, state=0, wavelength=0, photon_count=0):
+    """Build a raw photon Ethernet frame (photon_count 0 = legacy = one photon)."""
     dst = bytes.fromhex(BOB_MAC.replace(":", ""))
     src = bytes.fromhex(ALICE_MAC.replace(":", ""))
     eth_hdr = dst + src + struct.pack("!H", ETHERTYPE_PHOTON)
@@ -56,7 +59,7 @@ def build_photon_frame(seq_num, basis=0, state=0, wavelength=0):
         seq_num,
         0,           # timestamp_hi
         0,           # timestamp_lo
-        0,           # padding
+        photon_count,
     )
     # Pad to 60 bytes minimum
     frame = eth_hdr + photon_hdr
@@ -65,8 +68,11 @@ def build_photon_frame(seq_num, basis=0, state=0, wavelength=0):
     return frame
 
 
-def _count_received_packets(test, port, ethertype):
-    """Count matching frames until PTF reports a receive timeout."""
+def _count_received_packets(test, port, ethertype, counts=None):
+    """Count matching frames until PTF reports a receive timeout.
+
+    With ``counts`` (a dict) also histogram the photon-count byte of 0x7101 frames.
+    """
     received = 0
     ether_type_bytes = struct.pack("!H", ethertype)
     while True:
@@ -84,6 +90,9 @@ def _count_received_packets(test, port, ethertype):
             break
         if received_port == port and bytes(packet)[12:14] == ether_type_bytes:
             received += 1
+            if counts is not None and ethertype == ETHERTYPE_PHOTON:
+                c = bytes(packet)[14 + 16]
+                counts[c] = counts.get(c, 0) + 1
     return received
 
 
@@ -175,3 +184,54 @@ class ClassicalChannelForwardingTest(BaseTest):
         assert received == self.NUM_PACKETS, (
             f"Classical channel lost {self.NUM_PACKETS - received} of {self.NUM_PACKETS} frames"
         )
+
+
+class MultiPhotonPulseThinningTest(BaseTest):
+    """A decoy-state pulse frame (photon_count = n) is thinned per photon."""
+
+    NUM_PACKETS = 4_000
+    PHOTONS = 3
+    SIGMA_TOLERANCE = 3
+
+    def setUp(self):
+        BaseTest.setUp(self)
+        self.dataplane = ptf.dataplane_instance
+        self.dataplane.flush()
+        self.alice_port = 0
+        self.bob_port = 1
+        dump = subprocess.run(
+            ["simple_switch_CLI", "--thrift-port", "9090"],
+            input="table_dump_entry_from_key quantum_channel_params 0\n",
+            capture_output=True, text=True, check=True,
+        ).stdout
+        m = re.search(r"\bset_channel_params\b\s*-\s*(0x[0-9a-f]+|[0-9]+)\b", dump, re.IGNORECASE)
+        if m is None:
+            raise RuntimeError(f"Cannot read installed photon-loss threshold:\n{dump}")
+        self.P_LOSS = int(m.group(1), 0) / 2**32
+
+    def runTest(self):
+        n = self.PHOTONS
+        for seq in range(self.NUM_PACKETS):
+            testutils.send_packet(self, self.alice_port, build_photon_frame(seq, photon_count=n))
+        time.sleep(2)
+        hist = {}
+        received = _count_received_packets(self, self.bob_port, ETHERTYPE_PHOTON, counts=hist)
+
+        # forwarded iff >= 1 of n photons survives
+        p_fwd = 1.0 - self.P_LOSS ** n
+        expected = p_fwd * self.NUM_PACKETS
+        sigma = math.sqrt(self.NUM_PACKETS * p_fwd * (1 - p_fwd))
+        # surviving count per SENT pulse is Binomial(n, 1 - P_LOSS): mean n(1 - P_LOSS)
+        mean_surv = sum(k * v for k, v in hist.items()) / self.NUM_PACKETS
+        exp_mean = n * (1 - self.P_LOSS)
+        sigma_mean = math.sqrt(n * self.P_LOSS * (1 - self.P_LOSS) / self.NUM_PACKETS)
+
+        print("\n=== Multi-photon pulse thinning ===")
+        print(f"  pulses sent: {self.NUM_PACKETS} x {n} photons, P(loss) = {self.P_LOSS:.4f}")
+        print(f"  frames forwarded: {received} (expect {expected:.0f} ± {self.SIGMA_TOLERANCE * sigma:.0f})")
+        print(f"  survivor histogram: {dict(sorted(hist.items()))}")
+        print(f"  mean survivors per sent pulse: {mean_surv:.3f} (expect {exp_mean:.3f})")
+
+        assert abs(received - expected) <= self.SIGMA_TOLERANCE * sigma, "forwarded-frame count off"
+        assert abs(mean_surv - exp_mean) <= self.SIGMA_TOLERANCE * sigma_mean, "survivor mean off"
+        assert all(1 <= k <= n for k in hist), f"survivor count outside [1, {n}]: {hist}"

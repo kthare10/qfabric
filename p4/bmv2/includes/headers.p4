@@ -41,8 +41,15 @@ header photon_t {
     bit<32> sequence_num;   /* Monotonic photon ID */
     bit<32> timestamp_hi;   /* TX timestamp upper (picoseconds) */
     bit<32> timestamp_lo;   /* TX timestamp lower (picoseconds) */
-    bit<8>  padding;        /* Reserved */
+    bit<8>  photon_count;   /* Photons in this pulse (0 = legacy = 1); a
+                               weak-coherent (decoy-state) source sends
+                               Poisson(mu) counts. The switch thins the count
+                               per photon and forwards the survivors. */
 }
+
+/* The thinning loop is unrolled: pulses above this count are clamped. With
+ * mu <= 1 the probability of more than 8 photons is below 1e-6. */
+const bit<8> MAX_PHOTON_COUNT = 8;
 
 struct headers_t {
     ethernet_t ethernet;
@@ -52,6 +59,8 @@ struct headers_t {
 struct metadata_t {
     bit<32> loss_threshold;  /* Per-wavelength loss threshold */
     bit<32> random_value;    /* Random number for drop decision */
+    bit<8>  photon_count;    /* Photons in the pulse (clamped, >= 1) */
+    bit<8>  survivors;       /* Photons that survive the fiber */
     bit<9>  egress_port;     /* Forwarding port */
     bit<48> egress_src_mac;  /* Source MAC to rewrite on egress */
     bit<48> egress_dst_mac;  /* Dest MAC to rewrite on egress */

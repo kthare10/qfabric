@@ -43,7 +43,7 @@ stock BB84 *does* trip the guard; every run reports `remote_access_errors` (must
 | **Global timeline** | `time_authority.py`, `conservative_timeline.py`, `LogicalClock` in `remote_qm.py` | `--time-authority`: every message delivered at exactly `t_send + delay` in simulation time, so `late_events == 0` by construction at any wall-clock speed. **BB84's protocol phase** free-runs on an event queue and needs LBTS grants from the coordinator (`min(next_event + lookahead)` + in-flight message counting; result `timeline: authority`). **BB84 post-processing, E91 and the repeater chain** never free-run, so one shared per-node logical clock is the whole mechanism — no coordinator process, the endpoint is unused (result `timeline: logical`). Runs report `postprocess_sim_ps` / `sim_elapsed_ps`: reconciliation and herald latency as modeled quantities |
 | Post-processing | `reconcile_link.py` → `qne.reconcile` | Cascade, **key-verification tag** (Toeplitz, `ceil(log2(2/ε_cor))` bits; mismatch → `KeyVerificationError`, no key, `verification_failed: true`), Toeplitz PA, `--finite-key` (TLGR constant) |
 | Security depth | `qne.auth`, `distributed_qkd.py` | `--auth-key` HMAC + anti-replay on every link; `--basis-bias` (Z-only key, all X–X disclosed); `--eve-fraction` intercept-resend |
-| Decoy source | `distributed_qkd.py` + `qne.decoy` | Poisson intensities, per-photon thinning **at the source**; TCP-descriptor transport only, `loss_where = none` — the P4 switch is bypassed; no PNS adversary |
+| Decoy source | `distributed_qkd.py` + `qne.decoy`, `raw_photon.py` | Poisson intensities on either transport. TCP: per-photon thinning **at the source** (`loss_where = none`). Raw `0x7101`: the pulse's photon count rides in the frame and the P4 switch (or the channel's software model) thins it per photon; Bob dark-counts the slots that never arrive. No PNS adversary |
 | Entanglement | `qstate_core.py`, `quantum_state_service.py`, `remote_qm.py`, `e91.py`, `distributed_e91.py` | Werner weight `w` (the `fidelity` knob; results also report `bell_fidelity = (3w+1)/4`), QBER = (1−w)/2, CHSH S = 2√2·w; sift/QBER/Cascade/PA/finite-key over the real link |
 | Repeater chains | `repeater.py`, `distributed_repeater.py`, `sequence_swap_poc.py` | BSM swap + heralded Pauli correction, K stations (K+2 processes), Werner-chain law F = (1+3wᴸ)/4; `qstate_sequence.py` = SeQUeNCe `QuantumManagerKet`-backed register |
 
@@ -97,7 +97,7 @@ E91 (recorded to `../results/` by `deploy_fabric.py`; not tracked).
 
 1. **Raw-L2 classical backend for the repeater chain** (`--classical-transport l2` is
    refused there today; its K+1 links are TCP), and decoy on the raw `0x7101` path.
-2. **Decoy on the raw path** (photon-count field in `0x7101`, per-photon thinning in P4)
+2. **Decoy on the raw path — slice run.** The photon-count field and per-photon P4 thinning landed 2026-09-27 (loopback-verified); record a `--decoy --quantum-transport raw --loss switch` run on a slice
    and a PNS Eve.
 3. **NetSquid reference on the slice** (`.venv-nsq` needs netsquid.org credentials via
    `setup_sim_envs`) for the `sequence/02` distance comparison.

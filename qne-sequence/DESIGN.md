@@ -267,7 +267,7 @@ Reuse the QFabric photon frame exactly (`qne/photon.py`, `p4/bmv2/.../headers.p4
 | wavelength | 1 | P4 loss-table key (per-link / WDM) |
 | sequence_num | 4 | photon index (monotonic) |
 | timestamp_hi/lo | 8 | TX `now_ps()` (64-bit) |
-| padding | 1 | reserved |
+| photon_count | 1 | photons in the pulse (0 = legacy = 1; decoy-state source: Poisson(μ)); the switch rewrites it to the surviving count |
 
 Transport = raw `AF_PACKET` on layer 2, EtherType `0x7101`, through the BMv2 switch
 which drops with `P(loss)=1−10^(−αL/10)` (control plane already computes the

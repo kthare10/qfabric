@@ -20,7 +20,7 @@ formulas. Narrative and modeling assumptions live in the companion docs.
 
 | Channel | Frames | Switch behaviour | Transport options |
 |---|---|---|---|
-| Quantum | `0x7101` photon descriptors | per-wavelength probabilistic drop (fiber loss), MAC rewrite, counters; **table miss = drop** | raw L2 (slice); TCP descriptor batches (dev, `qne-sequence --quantum-transport tcp`) |
+| Quantum | `0x7101` photon descriptors | per-wavelength probabilistic drop (fiber loss) applied **per photon of the pulse** — a frame is dropped only when every photon is lost, otherwise forwarded with the surviving count; MAC rewrite, counters; **table miss = drop** | raw L2 (slice); TCP descriptor batches (dev, `qne-sequence --quantum-transport tcp`) |
 | Classical | `0x7102` reliable datagrams | forward + count, **never loss** (`classical_channel_params`) | raw L2 (`--classical-transport l2`); TCP (`qne/` path, dev) |
 
 ## 2. Photon frame (EtherType `0x7101`) — `qne/photon.py`, `p4/bmv2/includes/headers.p4`
@@ -35,9 +35,9 @@ Ethernet header (14 B: dst MAC, src MAC, `0x7101`) followed by the photon header
 | `wavelength` | u8 | keys the loss table (WDM hook; single wavelength today) |
 | `sequence_num` | u32 | monotonic photon id; the sifting key on both sides |
 | `timestamp_hi/lo` | 2×u32 | TX time, ps (informational — Bob never compares clocks) |
-| `padding` | u8 | reserved |
+| `photon_count` | u8 | photons in the pulse: 1 for an ideal source, Poisson(μ) for a decoy-state source; 0 (the old reserved byte) is read as 1; capped at 8. The switch thins it per photon and rewrites it to the surviving count |
 
-Frames are padded to the 60-byte Ethernet minimum. **There is no photon-count field**: decoy-state runs (Poisson photon numbers) therefore use the TCP descriptor transport with thinning at the source and do not traverse the P4 loss table (open item).
+Frames are padded to the 60-byte Ethernet minimum. A decoy-state pulse with n = 0 photons (vacuum, or fully lost in software) sends no frame; Bob dark-counts every slot whose frame never arrives.
 
 ## 3. Classical frame (EtherType `0x7102`) — `qne-sequence/qne_sequence/l2_link.py`
 

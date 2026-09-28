@@ -10,6 +10,12 @@ It mirrors `RemoteQuantumChannel`'s interface (`transmit_batch` / `transmit_one`
 `--quantum-transport raw` swaps the channel and adds a raw RX thread; nothing else
 changes. Loss is NOT applied here (the P4 switch owns the loss model).
 
+Decoy-state pulses ride the same frames: a 4-field pulse ``[seq, basis, bit, n]``
+puts ``n`` in the frame's photon-count byte (an empty pulse, n = 0, sends nothing —
+the slot can still dark-count at Bob). The P4 switch thins the count photon by
+photon and forwards the survivors; Bob's receiver hands the surviving count back
+to the protocol as the same 4-field pulse, so ``Detector.detect_pulse`` applies.
+
 `AF_PACKET` is Linux-only; this module imports cleanly everywhere but raises a clear
 error if a raw socket is actually opened on a platform without it (e.g. macOS dev box).
 Run the live path on a FABRIC slice / Linux with veth + BMv2.
@@ -26,7 +32,7 @@ import numpy
 from sequence.kernel.event import Event
 from sequence.kernel.process import Process
 
-from qne.photon import PhotonPacket, ETHERTYPE_PHOTON
+from qne.photon import PhotonPacket, ETHERTYPE_PHOTON, MAX_PHOTON_COUNT
 
 _HAS_AF_PACKET = hasattr(socket, "AF_PACKET")
 
@@ -90,19 +96,29 @@ class RawQuantumChannel:
     def _dropped(self) -> bool:
         return self.loss_probability > 0.0 and self._rng.random() < self.loss_probability
 
+    def _surviving(self, n_photons: int) -> int:
+        """Software fiber loss for a pulse of ``n_photons`` (no switch): each photon
+        survives independently with probability 1 - loss_probability."""
+        if n_photons <= 0:
+            return 0
+        if self.loss_probability <= 0.0:
+            return n_photons
+        return int(self._rng.binomial(n_photons, 1.0 - self.loss_probability))
+
     def _socket(self):
         if self._sock is None:
             self._sock = _open_raw_socket(self.interface)
         return self._sock
 
-    def _send_photon(self, seq: int, basis: int, bit: int) -> None:
+    def _send_photon(self, seq: int, basis: int, bit: int, n_photons: int = 1) -> None:
         # Informational timestamp only — Bob's RawPhotonReceiver never reads it
-        # (it extracts [seq, basis, state]). Value is time_ns() in *nanoseconds*
+        # (it extracts [seq, basis, state, count]). Value is time_ns() in *nanoseconds*
         # (despite the frame field being named "picoseconds"); split hi/lo.
         ts = time_ns()
         pkt = PhotonPacket(basis=int(basis), state=int(bit), sequence_num=int(seq),
                            wavelength=self.wavelength,
-                           timestamp_hi=(ts >> 32) & 0xFFFFFFFF, timestamp_lo=ts & 0xFFFFFFFF)
+                           timestamp_hi=(ts >> 32) & 0xFFFFFFFF, timestamp_lo=ts & 0xFFFFFFFF,
+                           photon_count=min(int(n_photons), MAX_PHOTON_COUNT))
         self._socket().send(pkt.to_ethernet_frame(dst_mac=self.dst_mac, src_mac=self.src_mac))
         self.tx_count += 1
 
@@ -113,15 +129,21 @@ class RawQuantumChannel:
         interval = (1.0 / self.rate_hz) if self.rate_hz > 0 else 0.0
         t0 = perf_counter()
         emitted = 0
-        for seq, basis, bit in pulses:
-            if self._dropped():
-                continue
+        for seq, basis, bit, *rest in pulses:
+            if rest:                        # decoy pulse: [seq, basis, bit, n_photons]
+                n = self._surviving(int(rest[0]))
+                if n <= 0:                  # vacuum / fully lost: nothing on the wire
+                    continue
+            else:
+                if self._dropped():
+                    continue
+                n = 1
             if interval:
                 target = t0 + emitted * interval
                 remaining = target - perf_counter()
                 if remaining > 0:
                     sleep(remaining)
-            self._send_photon(seq, basis, bit)
+            self._send_photon(seq, basis, bit, n)
             emitted += 1
 
     def transmit_one(self, src_name: str, receiver_proto: str,
@@ -175,20 +197,35 @@ class RawPhotonReceiver:
                 continue
             except OSError:
                 break
-            try:
-                pkt = PhotonPacket.from_ethernet_frame(frame)
-            except ValueError:
+            pulse = self.pulse_from_frame(frame)
+            if pulse is None:
                 continue  # not a photon frame
             self.rx_count += 1
             self._seq += 1
             self.last_rx_ns = time_ns()
-            pulse = [[pkt.sequence_num, pkt.basis, pkt.state]]
-            proc = Process(self.protocol, "receive_qubits", [self.peer_name, pulse])
+            proc = Process(self.protocol, "receive_qubits", [self.peer_name, [pulse]])
             # Photons sort BEFORE any classical frame that shares their timestamp
             # (negative priority band): under the conservative timeline the photon
             # train and QUBITS_DONE can land on the same logical tick.
             self.timeline.inject(Event(self.timeline.now() + self.delay, proc,
                                        priority=_PHOTON_PRIORITY_BASE + self._seq))
+
+    @staticmethod
+    def pulse_from_frame(frame: bytes):
+        """Decode one 0x7101 frame into the protocol's pulse descriptor, or None.
+
+        A single-photon frame yields ``[seq, basis, state]`` (plain BB84); a frame
+        carrying more than one surviving photon yields ``[seq, basis, state, n]``
+        so ``DistributedBB84.receive_qubits`` applies ``Detector.detect_pulse``.
+        """
+        try:
+            pkt = PhotonPacket.from_ethernet_frame(frame)
+        except ValueError:
+            return None
+        pulse = [pkt.sequence_num, pkt.basis, pkt.state]
+        if pkt.photon_count > 1:
+            pulse.append(pkt.photon_count)
+        return pulse
 
     def stop(self) -> None:
         self._running = False
