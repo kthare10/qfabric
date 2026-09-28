@@ -7,8 +7,8 @@ re-uploads and new versions stay consistent.
 ## 1. Build the artifact tarball
 
 ```bash
-bash scripts/package_artifact.sh v0.1.0
-# -> dist/qfabric-v0.1.0.tgz   (clean: no .venv, .git, caches, or personal files)
+bash scripts/package_artifact.sh v0.2.0
+# -> dist/qfabric-v0.2.0.tgz   (clean: no .venv, .git, caches, or personal files)
 ```
 
 The tarball extracts to a top-level `qfabric/` directory. Run outputs are **not**
@@ -25,29 +25,34 @@ Enter these in the Artifact Manager UI (or via the REST API — fields below map
 
 | Field | Value |
 |-------|-------|
-| `title` (required) | `QFabric: Quantum Network Emulation on FABRIC (BB84 QKD over P4)` |
-| `description_short` (≤255) | `Programmable quantum-channel emulation with P4/BMv2; BB84 QKD cross-validated against SeQUeNCe & NetSquid.` |
+| `title` (required) | `QFabric: Quantum Network Emulation on FABRIC (QKD and entanglement over a P4 data plane)` |
+| `description_short` (≤255) | `Fiber emulated in a P4/BMv2 data plane; BB84, decoy-state BB84, E91/BBM92 and entanglement swapping as distributed processes on FABRIC, cross-validated against SeQUeNCe & NetSquid.` |
 | `description_long` (required, ≤5000) | See below |
 | `authors` (required) | Komal Thareja — RENCI, UNC Chapel Hill — kthare10@renci.org (+ FABRIC author UUID) |
-| `tags` (required) | `quantum-networking`, `qkd`, `bb84`, `p4`, `bmv2`, `emulation`, `sequence`, `netsquid` |
+| `tags` (required) | `quantum-networking`, `qkd`, `bb84`, `e91`, `entanglement-swapping`, `decoy-states`, `p4`, `bmv2`, `emulation`, `sequence`, `netsquid` |
 | `visibility` | `project` first; switch to `public` when ready (`author` \| `project` \| `public`) |
 | `project_uuid` | your FABRIC project UUID |
 
 ### description_long — plain / markdown (paste into the form)
 
 > QFabric is a programmable quantum network emulation platform built on the FABRIC
-> testbed. It emulates fiber attenuation as probabilistic packet drop in a P4/BMv2
-> data plane (custom EtherType 0x7101 photon frames) and runs BB84 QKD across real
-> FABRIC links: Alice (photon source) → P4 switch (quantum channel) → Bob (detector
-> model with efficiency, dark counts, and polarization-misalignment QBER), with
-> classical sifting over the data-plane link so genuine WAN latency/jitter enters the
-> protocol. A cross-validation framework runs the measured FABRIC result, a QFabric
-> simulation, SeQUeNCe 1.0, and NetSquid — each on its own slice node — and checks
-> statistical agreement on QBER and secure key rate. A set of notebooks — all of
-> which run on a slice — drives the whole thing on FABRIC: fabric/ (set up, run,
-> analyse, sweep), sequence/ (the distributed runtime, E91) and
-> concepts/ (one capability each: eavesdropper, reconciliation, repeaters, security
-> depth, distributed computing). See README.md, docs/SPEC.md, docs/ROADMAP.md.
+> testbed, for studying quantum network protocols as distributed systems. Fiber
+> attenuation is emulated in a P4/BMv2 data plane as probabilistic drop of custom
+> EtherType 0x7101 photon frames (per photon of a pulse, so decoy-state sources
+> ride the same path), and the classical channel is raw 0x7102 frames through the
+> same switch. BB84, decoy-state BB84, E91/BBM92, n-node entanglement swapping and a
+> distributed gate (teleportation, non-local CNOT) run as separate processes on
+> separate FABRIC VMs on top of an unmodified SeQUeNCe 1.0, with full key
+> distillation: Cascade, key verification, Toeplitz privacy amplification,
+> finite-key bounds, decoy (GLLP) accounting and an authenticated classical
+> channel. A central time authority gives every run a shared logical clock and a
+> delivery certificate. The quantum states are statistical models (a Werner
+> register), not photonics, and delays are modeled, not measured. Cross-validation
+> runs the measured result, a QFabric simulation, SeQUeNCe and NetSquid on the same
+> slice and checks agreement. Notebooks drive everything on a slice: fabric/ (set
+> up, run, sweep, analyse), sequence/ (the distributed runtime, E91) and concepts/
+> (eavesdropper, reconciliation, repeaters, security depth, distributed computing).
+> See README.md, docs/ASSUMPTIONS.md, docs/SPEC.md, docs/ROADMAP.md.
 
 ### description_long — HTML (if the field renders HTML)
 
@@ -103,8 +108,11 @@ See <code>README.md</code>, <code>docs/SPEC.md</code>, and <code>docs/ROADMAP.md
 
 ## 3. Upload
 
-- **Web UI:** create the artifact with the metadata above, then upload `dist/qfabric-v0.1.0.tgz` as a version (set the version string, e.g. `0.1.0`).
-- **REST API:** `POST /api/artifacts` (metadata) then `POST /api/contents` (multipart `file=@dist/qfabric-v0.1.0.tgz`, `data={artifact:<uuid>, storage_type:fabric, storage_repo:renci}`).
+- **Web UI:** create the artifact with the metadata above, then upload `dist/qfabric-v0.2.0.tgz` as a version (set the version string, e.g. `0.2.0`).
+- **REST API:** `POST /api/artifacts` (metadata) then `POST /api/contents` (multipart `file=@dist/qfabric-v0.2.0.tgz`, `data={artifact:<uuid>, storage_type:fabric, storage_repo:renci}`).
+
+- **fablib:** `fablib.create_artifact(...)` / `fablib.upload_file_to_artifact(...)` from the
+  same configured environment as the notebooks (used for the 0.2.0 upload on 2026-09-27).
 
 ## 4. Pre-upload checklist
 

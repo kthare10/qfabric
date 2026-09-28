@@ -1,14 +1,16 @@
 cff-version: 1.2.0
 message: "If you use QFabric in your research, please cite it as below."
-title: "QFabric: Quantum Network Emulation on FABRIC (BB84 QKD over P4)"
+title: "QFabric: Quantum Network Emulation on FABRIC (QKD and entanglement over a P4 data plane)"
 abstract: >-
   QFabric is a programmable quantum network emulation platform built on the
-  FABRIC testbed. It emulates quantum channels using P4 programmable switches
-  and runs BB84 QKD as its first protocol, with cross-validation against the
-  SeQUeNCe and NetSquid simulators. The classical sifting traffic runs over a
-  real WAN so genuine latency, jitter, and congestion enter the protocol.
+  FABRIC testbed. Fiber attenuation is emulated in a P4/BMv2 data plane as
+  probabilistic drop of custom-EtherType photon frames, and BB84, decoy-state
+  BB84, E91/BBM92, multi-hop entanglement swapping and a distributed gate run
+  as real distributed processes across FABRIC nodes with full key
+  distillation, cross-validated against the SeQUeNCe and NetSquid simulators
+  on the same slice.
 type: software
-version: "0.1.0"
+version: "0.2.0"
 license: Apache-2.0
 repository-code: "https://github.com/kthare10/qfabric"
 repository-artifact: "https://artifacts.fabric-testbed.net/"
@@ -18,6 +20,9 @@ keywords:
   - BB84
   - P4
   - BMv2
+  - E91
+  - entanglement swapping
+  - decoy states
   - network emulation
   - FABRIC testbed
 authors:
