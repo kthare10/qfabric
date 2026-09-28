@@ -114,6 +114,11 @@ See <code>README.md</code>, <code>docs/SPEC.md</code>, and <code>docs/ROADMAP.md
 - **fablib:** `fablib.create_artifact(...)` / `fablib.upload_file_to_artifact(...)` from the
   same configured environment as the notebooks (used for the 0.2.0 upload on 2026-09-27).
 
+- **QR code:** `docs/fabric-artifact-qr.png` encodes the artifact page
+  `https://artifacts.fabric-testbed.net/artifacts/bb8facbe-2c99-40b4-bbf1-034e4b03df5d`
+  (generated with `segno`, error level M). It is on the closing slide of the KNIT13 deck;
+  regenerate it only if the artifact is ever re-created under a new id.
+
 ## 4. Pre-upload checklist
 
 - [ ] `pytest tests/ -v` passes
