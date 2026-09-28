@@ -168,7 +168,10 @@ class Link:
             if payload is None:
                 break
             if self.on_frame is not None:
-                self.on_frame(payload)
+                try:
+                    self.on_frame(payload)
+                except Exception as exc:  # noqa: BLE001 - a handler bug must not kill the link
+                    print(f"Link: frame handler raised {exc!r}; frame dropped", flush=True)
             self.rx_count += 1          # counted only once it is queued (see recv_one)
 
     def send(self, payload: bytes) -> None:
@@ -238,14 +241,54 @@ class Listener:
         self.timeline = timeline
         self.node = node
         self.protocol = protocol
+        # Post-processing frames (RpcChannel's Cascade/PA traffic) that arrive before
+        # the link is handed to the RpcChannel. The peer may finish the protocol and
+        # send its first PARITY_REQ while this side is still tearing the timeline
+        # down; the frame used to crash this handler (KeyError 'kind'), killing the
+        # link's RX thread, and both sides then timed out (slice run 2026-09-28).
+        # `hand_over` moves them to the new handler atomically with respect to the
+        # link's RX thread (the lock is taken by both), so no frame can slip between
+        # "stash drained" and "link re-pointed".
+        self.pending_rpc: list[bytes] = []
+        self._lock = threading.Lock()
+        self._handoff_target = None
+        self.dropped_after_handoff = 0
         self.delay = delay
         self._seq = 0  # monotonic priority -> preserve wire (FIFO) order at equal times
         self.on_time_events = 0
         self.late_events = 0
         self.max_lateness_ps = 0
 
+    def hand_over(self, handler) -> int:
+        """Route post-processing frames to ``handler`` from now on and give it what
+        was stashed so far, in arrival order, as ONE step the RX thread cannot
+        interleave with. Returns the number of stashed frames delivered. The caller
+        then re-points the link itself; a frame the RX thread already fetched this
+        handler for is forwarded, never lost."""
+        with self._lock:
+            stashed = self.pending_rpc
+            self.pending_rpc = []
+            for data in stashed:
+                handler(data)
+            self._handoff_target = handler
+            return len(stashed)
+
     def on_frame(self, data: bytes) -> None:
         frame = WireCodec.decode(data)
+        if "kind" not in frame:
+            # not a protocol frame: the peer has moved on to post-processing.
+            with self._lock:
+                if self._handoff_target is not None:
+                    self._handoff_target(data)          # link re-pointing raced us
+                else:
+                    self.pending_rpc.append(data)       # kept for the RpcChannel
+            return
+        with self._lock:
+            if self._handoff_target is not None:
+                # a protocol frame after the protocol ended (a straggler): the
+                # timeline is stopped, so it has nowhere to go -- count, drop
+                self.dropped_after_handoff += 1
+                return
         now = self.timeline.now()
         t_send = frame.get("t_send")
         if t_send is not None and self.delay > 0:

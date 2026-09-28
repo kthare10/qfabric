@@ -353,7 +353,10 @@ class ReliableLink:
             if payload is None:
                 break
             if self.on_frame is not None:
-                self.on_frame(payload)
+                try:
+                    self.on_frame(payload)
+                except Exception as exc:  # noqa: BLE001 - a handler bug must not kill the link
+                    print(f"ReliableLink: frame handler raised {exc!r}; frame dropped", flush=True)
             self.rx_count += 1          # counted only once it is queued
 
     def send(self, payload: bytes) -> None:

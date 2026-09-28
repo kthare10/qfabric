@@ -345,7 +345,8 @@ class Bob:
                 try:
                     final, corrections, bits_leaked = drive_cascade(
                         ChannelRpc(channel), key_bits, qber_est.qber,
-                        self.config.derived_seed(303), finite=finite, qber_pa=qber_pa)
+                        self.config.derived_seed(303), finite=finite, qber_pa=qber_pa,
+                        qber_upper=qber_est.confidence_interval[1])
                     reconciled = True
                 except KeyVerificationError as e:
                     corrections, bits_leaked = e.corrections, e.bits_leaked

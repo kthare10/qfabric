@@ -69,7 +69,8 @@ class RpcChannel:
 
     def __init__(self, link, delay_ps: int = 0, peer_offset_ns: int = 0,
                  logical: bool = False, logical_start_ps: int = 0,
-                 clock: "LogicalClock | None" = None):
+                 clock: "LogicalClock | None" = None,
+                 handoff=None):
         self.link = link
         self.delay_ps = int(delay_ps)
         self.delay_ns = int(delay_ps) // 1000
@@ -83,6 +84,14 @@ class RpcChannel:
         self.on_time_events = 0
         self.late_events = 0
         self.max_lateness_ns = 0
+        # Taking over a link from the protocol Listener: the peer's first PARITY_REQ
+        # can arrive before this point. `handoff.hand_over` delivers what the Listener
+        # stashed and makes it forward anything later, atomically against the RX
+        # thread; only then is the link re-pointed here. A frame the RX thread had
+        # already dispatched to the Listener is forwarded by it, so none is lost or
+        # reordered.
+        if handoff is not None:
+            handoff.hand_over(self._on_frame)
         link.on_frame = self._on_frame
 
     @property

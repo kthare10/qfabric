@@ -119,8 +119,23 @@ def serve_parities(rpc, key_bits):
             raise ValueError(f"unexpected frame during reconciliation: {kind}")
 
 
+def cascade_sizing_qber(qber: float, qber_upper: float | None, n: int) -> float:
+    """The error rate Cascade should size its blocks for.
+
+    The point estimate from a small disclosed sample can land well below the true
+    rate (one error in 345 bits read 0.29% on a 1% channel, 2026-09-28): blocks then
+    come out several times too large, even-error blocks slip every pass and the
+    verification tag rejects the key. Sizing with the sample's Wilson upper bound
+    costs a little extra parity leak (which is charged as measured) and makes the
+    passes converge. Floored so a sample that missed every error cannot collapse
+    block sizing to the whole key.
+    """
+    floor = 1.0 / (2 * max(n, 1))
+    return max(qber, qber_upper or 0.0, floor)
+
+
 def drive_cascade(rpc, key_bits, qber, seed, passes=4, finite=None, *,
-                  qber_pa=None, max_out_len=None):
+                  qber_pa=None, max_out_len=None, qber_upper=None):
     """Bob side: reconcile ``key_bits`` toward Alice's via Cascade, then privacy-
     amplify to the secure length. Announces the (public) hash seed + output length
     so Alice extracts the identical secret.
@@ -137,6 +152,10 @@ def drive_cascade(rpc, key_bits, qber, seed, passes=4, finite=None, *,
     finite-key bound (qne/finite_key.py): pass {"n_sample": <QBER sample size>}
     plus optional "eps_sec"/"eps_cor" overrides.
 
+    ``qber_upper`` (the Wilson upper bound of the disclosed sample) sizes Cascade's
+    blocks when it exceeds ``qber`` -- see ``cascade_sizing_qber``. Leak accounting
+    and PA keep using the measured values.
+
     Returns (final_key_bits, corrections, bits_leaked) — the extracted secret key.
     """
     def parity_oracle(blocks):
@@ -145,11 +164,11 @@ def drive_cascade(rpc, key_bits, qber, seed, passes=4, finite=None, *,
                         expected="PARITY_RESP")
         return resp["parities"]
 
-    # floor QBER so a sample that missed all errors doesn't collapse block sizing.
     # Cascade's block permutations are public (announced as index sets); ``seed``
     # only makes the permutation reproducible for tests and is never sent.
     cascade_seed = seed if seed is not None else int.from_bytes(os.urandom(4), "big")
-    res = reconcile(list(key_bits), parity_oracle, max(qber, 1.0 / (2 * len(key_bits))),
+    res = reconcile(list(key_bits), parity_oracle,
+                    cascade_sizing_qber(qber, qber_upper, len(key_bits)),
                     passes=passes, seed=cascade_seed)
     eps_cor = (finite or {}).get("eps_cor", DEFAULT_EPS_COR)
     t = verification_bits(eps_cor)

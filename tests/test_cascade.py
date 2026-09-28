@@ -81,3 +81,20 @@ def test_empty_key():
     r = reconcile([], _oracle([]), 0.05)
     assert r.corrected_key == []
     assert r.corrections == 0 and r.bits_leaked == 0
+
+
+def test_cascade_sizing_uses_the_sample_upper_bound():
+    """A lucky small sample must not blow up the block size (2026-09-28 slice run:
+    1 error in 345 sampled bits on a ~1% channel -> 250-bit blocks -> residual
+    errors -> verification failure). Sizing follows the Wilson upper bound."""
+    from qne.bb84 import BB84Protocol
+    from qne.cascade import initial_block_size
+    from qne.reconcile import cascade_sizing_qber
+
+    lo, hi = BB84Protocol.wilson_interval(1 / 345, 345)
+    assert cascade_sizing_qber(1 / 345, hi, 1384) == hi
+    assert initial_block_size(hi, 1384) < 60 < initial_block_size(1 / 345, 1384)
+    # the estimate wins when it is the larger; the floor wins for an all-clean sample
+    assert cascade_sizing_qber(0.05, 0.04, 1000) == 0.05
+    assert cascade_sizing_qber(0.0, 0.0, 1000) == 1 / 2000
+    assert cascade_sizing_qber(0.0, None, 1000) == 1 / 2000

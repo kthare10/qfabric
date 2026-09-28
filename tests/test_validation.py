@@ -160,9 +160,13 @@ class TestFabricLossUpdates:
         slice_obj = Mock()
         switch = slice_obj.get_node.return_value
         switch.get_interface.return_value.get_mac.return_value = "02:00:00:00:00:02"
-        switch.execute.side_effect = lambda command, **kwargs: (
-            "bmv2\n" if "docker ps" in command else "/home/test\n", "",
-        )
+        def fake_execute(command, **kwargs):
+            if "docker ps" in command:
+                return "bmv2\n", ""
+            if "table_dump" in command:       # the add landed: dump shows 123 = 0x7b
+                return "Action entry: PhotonIngress.set_channel_params - 0x7b, 0x1\n", ""
+            return "/home/test\n", ""
+        switch.execute.side_effect = fake_execute
         deploy_fabric.configure_switch(slice_obj, 123)
         commands = [call.args[0] for call in switch.execute.call_args_list]
         assert not any(
@@ -172,6 +176,100 @@ class TestFabricLossUpdates:
         table_commands = [command for command in commands if "table_add" in command]
         assert len(table_commands) == 5
         assert all("sudo docker exec -i bmv2 simple_switch_CLI" in cmd for cmd in table_commands)
+
+    def test_running_container_is_rebuilt_when_p4_sources_are_newer(self, monkeypatch):
+        """upload_project refreshed p4/bmv2 after the container started: reusing it
+        would keep the old data plane, so configure_switch recompiles and restarts
+        with the container's own image (no QFABRIC_BMV2_IMAGE needed)."""
+        monkeypatch.delenv("QFABRIC_BMV2_IMAGE", raising=False)
+        monkeypatch.setattr(deploy_fabric.time, "sleep", lambda *_: None)
+        slice_obj = Mock()
+        switch = slice_obj.get_node.return_value
+        switch.get_interface.return_value.get_mac.return_value = "02:00:00:00:00:02"
+
+        def fake_execute(command, **kwargs):
+            if "docker ps" in command:
+                return "bmv2\n", ""
+            if "echo STALE" in command:
+                return "STALE\n", ""
+            if "docker inspect" in command:
+                return "ghcr.io/kthare10/qfabric-bmv2:latest\n", ""
+            if "pgrep -a simple_switch" in command:
+                return "1 simple_switch --interface 0@eth0\n", ""
+            if "table_dump" in command:
+                return "Action entry: PhotonIngress.set_channel_params - 0x7b, 0x1\n", ""
+            return "/home/test\n", ""
+        switch.execute.side_effect = fake_execute
+        deploy_fabric.configure_switch(slice_obj, 123)
+        commands = [call.args[0] for call in switch.execute.call_args_list]
+        assert any("p4c-bm2-ss" in c and "qfabric-bmv2:latest" in c for c in commands)
+        assert any("docker run -d --name bmv2" in c and "ip link del br-qne" in c for c in commands)
+        assert not any("systemctl" in c for c in commands)      # never the source-build path
+
+    def test_reused_container_gets_the_new_threshold_by_modify(self, monkeypatch):
+        """On a reused container the photon entry exists, so table_add is rejected;
+        configure_switch must notice the stale dump and table_modify the threshold."""
+        monkeypatch.delenv("QFABRIC_BMV2_IMAGE", raising=False)
+        slice_obj = Mock()
+        switch = slice_obj.get_node.return_value
+        switch.get_interface.return_value.get_mac.return_value = "02:00:00:00:00:02"
+        state = {"thr": "0xabc"}                       # what the switch currently holds
+
+        def fake_execute(command, **kwargs):
+            if "docker ps" in command:
+                return "bmv2\n", ""
+            if "table_modify quantum_channel_params" in command:
+                state["thr"] = "0x7b"
+            if "table_dump" in command:
+                return f"Action entry: PhotonIngress.set_channel_params - {state['thr']}, 0x1\n", ""
+            return "/home/test\n", ""
+        switch.execute.side_effect = fake_execute
+        deploy_fabric.configure_switch(slice_obj, 123)
+        commands = [call.args[0] for call in switch.execute.call_args_list]
+        assert any("table_modify quantum_channel_params set_channel_params 0 123" in c for c in commands)
+        assert state["thr"] == "0x7b"
+
+    def test_get_channel_loss_reads_the_installed_threshold(self):
+        slice_obj = Mock()
+        switch = slice_obj.get_node.return_value
+        real_dump = (
+            "TABLE ENTRIES\n**********\nDumping entry 0x0\nMatch key:\n"
+            "* photon.wavelength   : EXACT     00\n"
+            "Action entry: PhotonIngress.set_channel_params - 0b859b1b, 01, 1e987c47c42d, 2226555ee928\n"
+            "==========\nDumping default entry\nAction entry: PhotonIngress.drop_photon - \n")
+        switch.execute.side_effect = lambda command, **kwargs: (
+            "bmv2\n" if "docker ps" in command else real_dump, "")
+        assert deploy_fabric.get_channel_loss(slice_obj) == 0x0B859B1B
+        switch.execute.side_effect = lambda command, **kwargs: ("Dumping default entry\n", "")
+        with pytest.raises(RuntimeError, match="configure_switch first"):
+            deploy_fabric.get_channel_loss(slice_obj)
+
+    def test_threshold_readback_is_hex_when_the_line_proves_it_and_refuses_to_guess(self):
+        """The CLI prints unprefixed hex; an all-digit threshold token must not be
+        read as decimal when the MACs on the same line show the line is hex, and
+        must be refused (not guessed) when nothing disambiguates it."""
+        hex_line = ("Dumping entry 0x0\nMatch key:\n* photon.wavelength : EXACT 00\n"
+                    "Action entry: PhotonIngress.set_channel_params - 10000000, 01, 1e987c47c42d, 2226555ee928\n")
+        assert deploy_fabric._entry_thresholds(hex_line) == [(0, 0x10000000)]
+        digits_only = ("Dumping entry 0x0\nMatch key:\n* photon.wavelength : EXACT 00\n"
+                       "Action entry: PhotonIngress.set_channel_params - 10000000, 01, 020000000011, 020000000002\n")
+        with pytest.raises(deploy_fabric.AmbiguousThresholdError):
+            deploy_fabric._entry_thresholds(digits_only)
+        # two wavelengths: the requested one is returned, not the first listed
+        two = ("Dumping entry 0x0\nMatch key:\n* photon.wavelength : EXACT 01\n"
+               "Action entry: PhotonIngress.set_channel_params - 0000abcd, 01, 1e987c47c42d, 2226555ee928\n"
+               "Dumping entry 0x1\nMatch key:\n* photon.wavelength : EXACT 00\n"
+               "Action entry: PhotonIngress.set_channel_params - 0b859b1b, 01, 1e987c47c42d, 2226555ee928\n")
+        assert deploy_fabric._entry_thresholds(two) == [(1, 0xABCD), (0, 0x0B859B1B)]
+        # several entries without match keys cannot be attributed: refuse, do not pick one
+        slice_obj = Mock()
+        switch = slice_obj.get_node.return_value
+        switch.execute.side_effect = lambda command, **kwargs: (
+            "bmv2\n" if "docker ps" in command else
+            "Dumping entry 0x0\nAction entry: PhotonIngress.set_channel_params - 0000abcd, 01, 1e987c47c42d, 2226555ee928\n"
+            "Dumping entry 0x1\nAction entry: PhotonIngress.set_channel_params - 0b859b1b, 01, 1e987c47c42d, 2226555ee928\n", "")
+        with pytest.raises(RuntimeError, match="configure_switch first"):
+            deploy_fabric.get_channel_loss(slice_obj)
 
     def test_sweep_configures_once_and_records_failures(self, tmp_path, monkeypatch):
         scenarios_dir = tmp_path / "validation" / "scenarios"

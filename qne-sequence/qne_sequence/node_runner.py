@@ -321,14 +321,16 @@ def run_node(role_name: str, name: str, peer: str, host: str, port: int,
         # message is delivered at exactly t_send + delay in simulation time and
         # is covered by the same certificate. Wall-clock mode keeps real sleeps.
         rpc = RpcChannel(link, delay_ps=channel_delay, peer_offset_ns=peer_offset_ns,
-                         logical=(ta_client is not None), logical_start_ps=tl.time)
+                         logical=(ta_client is not None), logical_start_ps=tl.time,
+                         handoff=listener)
         finite = ({"n_sample": int(result.get("num_sampled") or 0),
                    "eps_sec": eps_sec, "eps_cor": eps_cor} if finite_key else None)
         try:
             if role == 1:        # Bob drives Cascade + announces the PA hash
+                qber_ci = dbb.metrics.get("qber_ci") or (qber, qber)
                 final_key, corrections, bits_leaked = drive_cascade(
                     rpc, sift_key, qber, seed + 303, passes=cascade_passes, finite=finite,
-                    qber_pa=qber_pa, max_out_len=decoy_cap)
+                    qber_pa=qber_pa, max_out_len=decoy_cap, qber_upper=qber_ci[1])
             else:                # Alice answers parities, then applies the same PA hash
                 final_key, corrections, bits_leaked = serve_parities(rpc, sift_key)
             reconciled = True

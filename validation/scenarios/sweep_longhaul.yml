@@ -1,0 +1,27 @@
+# Long-haul distance sweep: where dark counts start to set the QBER.
+#
+# With the default detector (10 Hz darks, 1 ns gate -> 1e-8 dark clicks per slot)
+# the QBER stays at the intrinsic (1-F)/2 = 1% all the way to 100 km: signal
+# detections (0.8% of slots at 100 km) still dwarf the darks. The knee appears
+# only when P(dark) approaches P(signal). This sweep makes it visible within a
+# testbed-sized run by raising the dark-click probability per slot to 1e-4 --
+# equivalent to a slow 1 us gate at 100 Hz, or a noisy 1e5 Hz detector behind
+# the 1 ns gate the sweep scenarios carry (only the product rate x window enters
+# the model). Expected QBER: ~1.1% (50 km), 1.6% (100 km), 6.4% (150 km),
+# 28% (200 km, past the 11% cliff: no key). 1e6 photons keep the 200 km point
+# meaningful (~80 signal + ~100 dark detections).
+#
+# Run: fabric/03 with SCENARIOS pointed at this file (each point ~100 s of
+# photon emission at 10 kHz plus reconciliation).
+sweep:
+  parameter: distance_km
+  values: [50, 100, 125, 150, 175, 200]
+
+base:
+  attenuation_db_per_km: 0.2
+  detector_efficiency: 0.8
+  dark_count_rate_hz: 100000.0     # x 1 ns gate = 1e-4 dark clicks per slot
+  polarization_fidelity: 0.98
+  num_photons: 1000000
+  sample_fraction: 0.1
+  seed: 42

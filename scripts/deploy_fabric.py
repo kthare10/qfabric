@@ -482,8 +482,25 @@ def _bmv2_cli(switch) -> str:
             else "/usr/local/bin/simple_switch_CLI")
 
 
+def _wait_for_switch(switch, probe: str, attempts: int = 10, interval_s: float = 3.0) -> bool:
+    """Poll ``probe`` until it reports a simple_switch process (a 3 GB container image
+    can take well over one fixed sleep to come up; a single early check used to
+    report a healthy restart as failed)."""
+    for _ in range(attempts):
+        time.sleep(interval_s)
+        out, _ = switch.execute(probe, quiet=True)
+        if "simple_switch" in out:
+            return True
+    return False
+
+
 def configure_switch(slice_obj, threshold: int):
-    """Compile/start BMv2, or reuse its running container, then configure tables."""
+    """Compile/start BMv2, or reuse its running container, then configure tables.
+
+    Idempotent for the photon-loss entry: on a reused container ``table_add`` is
+    rejected for the existing key, so the requested threshold is verified in the
+    table dump and applied with ``table_modify`` when it did not land.
+    """
     print(f"\n=== Configuring switch (threshold={threshold}) ===")
 
     switch = slice_obj.get_node("switch")
@@ -519,6 +536,32 @@ def configure_switch(slice_obj, threshold: int):
     json_rel = "p4/bmv2/quantum_channel.json"
     image = os.environ.get("QFABRIC_BMV2_IMAGE", "").strip()
     cli = _bmv2_cli(switch)
+    container_running = cli.startswith("sudo docker exec")
+    if not image and container_running:
+        # A running container is reused (D2, 2026-09-21) -- unless the P4 sources
+        # uploaded since it was built are newer than the program it runs, in which
+        # case it would silently keep the old data plane (the 2026-09-28 decoy
+        # path needed exactly this rebuild).
+        stale, _ = switch.execute(
+            f"cd {home}/qfabric && (test ! -f {json_rel} || "
+            f"[ -n \"$(find p4/bmv2 -name '*.p4' -newer {json_rel} 2>/dev/null)\" ]) "
+            "&& echo STALE || echo FRESH", quiet=True)
+        if "STALE" in stale:
+            found, _ = switch.execute(
+                "sudo docker inspect -f '{{.Config.Image}}' bmv2 2>/dev/null || true", quiet=True)
+            image = (found.strip().splitlines() or [""])[0].strip()
+            print(f"  P4 sources are newer than the running program; rebuilding with {image or '?'}")
+    elif not image:
+        # No container and no QFABRIC_BMV2_IMAGE (a kernel started after fabric/01
+        # exported it): a switch set up with setup_switch_docker has only the
+        # container toolchain, so find the image on the host rather than falling
+        # through to a build from source that cannot work there.
+        found, _ = switch.execute(
+            "sudo docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null "
+            "| grep -m1 qfabric-bmv2 || true", quiet=True)
+        image = (found.strip().splitlines() or [""])[0].strip()
+        if image:
+            print(f"  QFABRIC_BMV2_IMAGE unset; using the switch's BMv2 image {image}")
 
     if image:
         # ---- Prebuilt Docker image: no per-deploy source build ----
@@ -534,6 +577,10 @@ def configure_switch(slice_obj, threshold: int):
         )
         print("  Starting BMv2 (container: --privileged --network host)...")
         switch.execute(
+            # concepts/03 replaces BMv2 with a Linux bridge (br-qne) over the same two
+            # interfaces; left in place it would forward alongside BMv2 (duplicate
+            # frames, no loss model), so take it down first. Idempotent.
+            "sudo ip link del br-qne 2>/dev/null || true; "
             "sudo docker rm -f bmv2 2>/dev/null; "
             f"sudo docker run -d --name bmv2 --privileged --network host "
             f"-v {home}/qfabric:/work {image} "
@@ -541,16 +588,14 @@ def configure_switch(slice_obj, threshold: int):
             f"--log-level warn /work/{json_rel}",
             quiet=True,
         )
-        time.sleep(4)
-        ps_out, _ = switch.execute(
-            "sudo docker exec bmv2 pgrep -a simple_switch 2>/dev/null || true", quiet=True)
-        if "simple_switch" not in ps_out:
+        if not _wait_for_switch(
+                switch, "sudo docker exec bmv2 pgrep -a simple_switch 2>/dev/null || true"):
             log_out, _ = switch.execute("sudo docker logs --tail 20 bmv2 2>&1 || true", quiet=True)
             print(f"  ERROR: BMv2 container not running!\n  Logs: {log_out.strip()}")
             raise RuntimeError("BMv2 (docker) failed to start")
         cli = _bmv2_cli(switch)
-    elif cli.startswith("sudo docker exec"):
-        print("  Reusing running BMv2 container (QFABRIC_BMV2_IMAGE is unset)")
+    elif container_running:
+        print("  Reusing running BMv2 container (its program is current with p4/bmv2)")
     else:
         # ---- Build-from-source path (p4c-bm2-ss + systemd-run) ----
         print("  Compiling P4 program...")
@@ -562,9 +607,10 @@ def configure_switch(slice_obj, threshold: int):
         )
         print("  Starting BMv2...")
         switch.execute(
+            "sudo ip link del br-qne 2>/dev/null || true; "   # see the Docker path above
             "sudo systemctl stop bmv2 2>/dev/null; "
             "sudo systemctl reset-failed bmv2 2>/dev/null; "
-            "sudo pkill -f simple_switch 2>/dev/null; sleep 2",
+            "sudo pkill -f '[s]imple_switch' 2>/dev/null; sleep 2",
             quiet=True,
         )
         ss_path_out, _ = switch.execute(
@@ -577,9 +623,7 @@ def configure_switch(slice_obj, threshold: int):
             f"--log-level warn {home}/qfabric/{json_rel}",
             quiet=True,
         )
-        time.sleep(3)
-        ps_out, _ = switch.execute("pgrep -a simple_switch", quiet=True)
-        if not ps_out.strip():
+        if not _wait_for_switch(switch, "pgrep -a simple_switch 2>/dev/null || true"):
             log_out, _ = switch.execute("sudo journalctl -u bmv2 --no-pager -n 20 2>/dev/null", quiet=True)
             print(f"  ERROR: BMv2 failed to start!\n  Journal: {log_out.strip()}")
             raise RuntimeError("BMv2 failed to start")
@@ -598,8 +642,91 @@ def configure_switch(slice_obj, threshold: int):
     ):
         switch.execute(f'echo "{cmd}" | {cli} --thrift-port 9090', quiet=True)
 
+    # execute() swallows CLI errors. On a reused container the photon entry already
+    # exists and its table_add is rejected, which would leave the OLD threshold in
+    # force (the frozen-sweep bug of 2026-09-21, D1). Verify, and modify in place.
+    dump, _ = switch.execute(
+        f'echo "table_dump quantum_channel_params" | {cli} --thrift-port 9090', quiet=True)
+    if not threshold_in_dump(dump, threshold):
+        switch.execute(
+            f'echo "table_modify quantum_channel_params set_channel_params 0 {threshold} 1 '
+            f'{sw_bob_mac_hex} {bob_mac_hex}" | {cli} --thrift-port 9090', quiet=True)
+        dump, _ = switch.execute(
+            f'echo "table_dump quantum_channel_params" | {cli} --thrift-port 9090', quiet=True)
+        if not threshold_in_dump(dump, threshold):
+            raise RuntimeError(
+                f"configure_switch: loss threshold {threshold} did not land in "
+                f"quantum_channel_params. Dump:\n{dump}")
+
     print("  Switch configured and running")
     return alice_mac, bob_mac, sw_alice_mac, sw_bob_mac, iface_alice, iface_bob
+
+
+class AmbiguousThresholdError(RuntimeError):
+    """The dump's threshold token could be read two ways (see get_channel_loss)."""
+
+
+def _entry_thresholds(dump: str) -> list[tuple[int | None, int]]:
+    """(wavelength, installed threshold) for every ``set_channel_params`` entry in a
+    BMv2 ``table_dump`` of quantum_channel_params, in dump order.
+
+    simple_switch_CLI prints action data as UNPREFIXED hex ('0b859b1b, 01,
+    1e987c47c42d, 2226555ee928'). A threshold whose hex happens to be all digits
+    ('10000000') is indistinguishable from a decimal by itself, so the line's other
+    tokens are used as evidence: when any of them (port, MACs) contains a-f the
+    line is hex. With no such evidence and differing readings the entry is
+    reported as ambiguous rather than guessed -- restoring a misread threshold
+    would silently change every later run's loss.
+    """
+    out: list[tuple[int | None, int]] = []
+    for chunk in re.split(r"Dumping entry", dump):
+        m = re.search(r"\bset_channel_params\b([^\r\n]*)", chunk, re.IGNORECASE)
+        if not m:
+            continue
+        tokens = re.findall(r"\b([0-9A-Za-z]+)\b", m.group(1))
+        if not tokens:
+            continue
+        tok = tokens[0]
+        km = re.search(r"EXACT\s+([0-9A-Fa-f]+)", chunk)
+        wl = int(km.group(1), 16) if km else None
+        if tok.lower().startswith("0x"):
+            val = int(tok, 16)
+        elif not tok.isdigit():
+            val = int(tok, 16)
+        else:
+            others_hex = any(re.search(r"[a-fA-F]", t) for t in tokens[1:])
+            if others_hex or int(tok, 16) == int(tok, 10):
+                val = int(tok, 16)
+            else:
+                raise AmbiguousThresholdError(
+                    f"threshold token {tok!r} reads as {int(tok, 16)} (hex) or "
+                    f"{int(tok, 10)} (decimal) and the line gives no evidence either way")
+        out.append((wl, val))
+    return out
+
+
+def get_channel_loss(slice_obj, wavelength: int = 0) -> int:
+    """The photon-loss threshold currently installed on the switch for ``wavelength``.
+
+    Lets a notebook that changes the loss for one run put back exactly what it found
+    instead of a guessed default. Raises RuntimeError if the entry is missing
+    (configure_switch has not run) or cannot be attributed to ``wavelength``, and
+    AmbiguousThresholdError if the dump cannot be read unambiguously. Callers must
+    treat either as "do not touch the loss table", never fall back to a guess."""
+    switch = slice_obj.get_node("switch")
+    cli = _bmv2_cli(switch)
+    dump, _ = switch.execute(
+        f'echo "table_dump quantum_channel_params" | {cli} --thrift-port 9090', quiet=True)
+    entries = _entry_thresholds(dump)
+    keyed = [v for wl, v in entries if wl == wavelength]
+    if len(keyed) == 1:
+        return keyed[0]
+    if not keyed and len(entries) == 1 and entries[0][0] is None:
+        return entries[0][1]              # one entry, dump without a match key
+    raise RuntimeError(
+        f"get_channel_loss: {'no' if not keyed else len(keyed)} set_channel_params "
+        f"entries for wavelength {wavelength} ({len(entries)} in the dump) — run "
+        f"configure_switch first. Dump:\n{dump}")
 
 
 def threshold_in_dump(dump: str, threshold: int) -> bool:
@@ -796,12 +923,12 @@ def run_bb84(slice_obj, scenario_path: str, alice_mac: str, bob_mac: str,
     # would fail and a failed run could then reuse the previous point's stale result.
     print("  Cleaning up previous runs...")
     bob_node.execute(
-        "sudo pkill -f 'qne.cli' 2>/dev/null; "
+        "sudo pkill -f '[q]ne.cli' 2>/dev/null; "
         "sudo rm -f ~/qfabric/results/*.json /tmp/bob.log; sleep 1",
         quiet=True,
     )
     alice_node.execute(
-        "sudo pkill -f 'qne.cli' 2>/dev/null; "
+        "sudo pkill -f '[q]ne.cli' 2>/dev/null; "
         "sudo rm -f ~/qfabric/results/*.json /tmp/alice.log; sleep 1",
         quiet=True,
     )
@@ -1114,8 +1241,12 @@ def setup_repeater_bridge(slice_obj, station_ip="10.10.1.3"):
         # BMv2 runs as the `bmv2` Docker container (--network host, see
         # configure_switch); `pkill simple_switch` on the host CANNOT stop it and
         # it keeps L2-forwarding + holding the ports, which blocks the bridge.
+        # The bracketed pattern ('[s]imple_switch') matches the running switch but
+        # NOT this very shell, whose command line contains the pattern text: a bare
+        # `pkill -f simple_switch` killed the shell running this string, so no
+        # command after it ever ran (no bridge, no station IP) -- 2026-09-28.
         "sudo docker rm -f bmv2 >/dev/null 2>&1 || true; "
-        "sudo pkill -f simple_switch >/dev/null 2>&1 || true; sleep 1; "
+        "sudo pkill -f '[s]imple_switch' >/dev/null 2>&1 || true; sleep 1; "
         # a fresh switch VM doesn't have the bridge module loaded, so
         # `ip link add type bridge` silently fails — load it first.
         "sudo modprobe bridge || true; "
@@ -1335,7 +1466,7 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
           f"key_length={key_length} mode={photon_mode} F={fidelity} eff={efficiency}")
 
     for node in (alice, bob):
-        node.execute("sudo pkill -f qne_sequence.node_runner 2>/dev/null; "
+        node.execute("sudo pkill -f '[q]ne_sequence.node_runner' 2>/dev/null; "
                      "sudo rm -f /tmp/seq_*.log; sleep 1", quiet=True)
 
     common = (f"--num-pulses {num_pulses} --key-length {key_length} "
@@ -1367,7 +1498,7 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
     if time_authority:
         ta_port = port + 100
         print(f"  Starting the time authority on bob ({bob_data_ip}:{ta_port})...")
-        bob.execute("sudo pkill -f qne_sequence.time_authority 2>/dev/null; true", quiet=True)
+        bob.execute("sudo pkill -f '[q]ne_sequence.time_authority' 2>/dev/null; true", quiet=True)
         authority_thread = bob.execute_thread(
             f"cd ~/qfabric/qne-sequence && env PYTHONPATH=$HOME/qfabric "
             f"$HOME/qfabric/{venv}/bin/python -m qne_sequence.time_authority "
@@ -1575,7 +1706,7 @@ def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
               f"sample_frac={sample_fraction}")
 
     for node in (alice, bob):
-        node.execute("sudo pkill -f qne_sequence.node_runner 2>/dev/null; "
+        node.execute("sudo pkill -f '[q]ne_sequence.node_runner' 2>/dev/null; "
                      "sudo rm -f /tmp/e91_*.log; sleep 1", quiet=True)
 
     common = (f"--protocol {mode} --num-pairs {num_pairs} --fidelity {fidelity} "
@@ -1721,7 +1852,7 @@ def run_sequence_dqc(slice_obj, *, num_gates=2000, primitive="telegate",
           f"dropped={dropped} late={late}")
 
     for node in (alice, bob):
-        node.execute("sudo pkill -f qne_sequence.node_runner 2>/dev/null; "
+        node.execute("sudo pkill -f '[q]ne_sequence.node_runner' 2>/dev/null; "
                      "sudo rm -f /tmp/dqc_*.log; sleep 1", quiet=True)
 
     common = (f"--protocol dqc --dqc-primitive {primitive} "
@@ -1834,7 +1965,7 @@ def run_sequence_repeater(slice_obj, *, num_pairs=20000, fidelity=0.95,
           f"atten={attenuation}dB/km sample_frac={sample_fraction}")
 
     for node in (alice, bob, switch):
-        node.execute("sudo pkill -f qne_sequence.node_runner 2>/dev/null; "
+        node.execute("sudo pkill -f '[q]ne_sequence.node_runner' 2>/dev/null; "
                      "sudo rm -f /tmp/rep_*.log; sleep 1", quiet=True)
 
     common = (f"--protocol repeater --chain-mode {chain_mode} "
