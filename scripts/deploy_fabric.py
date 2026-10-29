@@ -1378,15 +1378,15 @@ def run_sequence_bb84(slice_obj, *, num_pulses=20000, key_length=256,
                       dead_time=0.0, timing_jitter=0.0, pulse_period_ns=0.0,
                       decoy=False, mu_signal=0.6, mu_decoy=0.1, mu_vacuum=0.001,
                       decoy_probs="0.7,0.2,0.1", channel_delay="auto",
-                      classical_transport="tcp", epoch_ns=0, time_authority=False):
+                      classical_transport="tcp", epoch_ns=0, time_authority=True):
     """Run distributed-SeQUeNCe BB84 across the slice (raw 0x7101 photons via P4).
 
     ``time_authority=True`` starts the central time authority
     (``qne_sequence.time_authority``) on Bob's node -- "the timeline fixed on one
     node" -- and drives both runners from it: simulation time is then logical and
     advanced by LBTS grants, so no frame can arrive late whatever the real latency
-    (``lookahead.certified`` is true by construction). Default False keeps the
-    wall-clock-paced timeline.
+    (``lookahead.certified`` is true by construction). This is the DEFAULT (since
+    2026-10-29); pass False for the legacy wall-clock-paced timeline.
 
     Runs real SeQUeNCe QKDNode/BB84 instances (via `qne_sequence.node_runner`) on
     alice and bob: Bob listens (TCP classical + raw photon RX), Alice connects and
@@ -1647,7 +1647,7 @@ def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
                      bob_data_ip="10.10.1.2", venv=".venv-qne",
                      auth_key=None, finite_key=False,
                      classical_transport="tcp", channel_delay="auto",
-                     time_authority=False):
+                     time_authority=True):
     """Run distributed E91/BBM92 entanglement-based QKD across the slice.
 
     Unlike BB84, entanglement has **no photon plane**: Alice hosts the shared
@@ -1664,8 +1664,9 @@ def run_sequence_e91(slice_obj, *, num_pairs=20000, fidelity=0.98,
 
     ``channel_delay`` is the modeled one-way classical delay ('auto' = 4.9 us/km of
     ``distance_km``); before 2026-09-21 this was never passed, so E91 slice runs had
-    delay 0 and a vacuous lookahead certificate. ``time_authority=True`` puts the run
-    on the global timeline (shared logical clock; no coordinator process needed here).
+    delay 0 and a vacuous lookahead certificate. ``time_authority`` (default True)
+    puts the run on the global timeline (shared logical clock; no coordinator process
+    needed here); False falls back to the wall-clock-paced timeline.
 
     ``mode`` is 'e91' (adds the CHSH Bell test) or 'bbm92' (Z/X, key-efficient).
     Prereqs: slice up with data-plane IPs (notebook 01) and setup_sequence_runtime()
@@ -1793,7 +1794,7 @@ def run_sequence_dqc(slice_obj, *, num_gates=2000, primitive="telegate",
                      dropped=None, late=None, port=5100,
                      bob_data_ip="10.10.1.2", venv=".venv-qne",
                      auth_key=None, classical_transport="tcp",
-                     channel_delay="auto", time_authority=False):
+                     channel_delay="auto", time_authority=True):
     """Run a distributed **gate** across the slice (ROADMAP Phase 6).
 
     The same two-node shape as E91 -- alice hosts the register and is the control
@@ -1926,7 +1927,7 @@ def run_sequence_repeater(slice_obj, *, num_pairs=20000, fidelity=0.95,
                           bob_data_ip="10.10.1.2", venv=".venv-qne",
                           auth_key=None, finite_key=False,
                           apply_correction=True, num_stations=1,
-                          channel_delay="auto", time_authority=False):
+                          channel_delay="auto", time_authority=True):
     """Run the entanglement-swapping repeater chain across the slice.
 
     The repeater STATION(s) run on the switch node, physically between the
