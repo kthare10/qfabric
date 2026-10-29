@@ -74,6 +74,33 @@ slice it builds.
 Tracks: **deploy** `fabric/01→02→03→04`; **learn QKD** `fabric/02` → `concepts/01→02→04`;
 **entanglement & compute** `sequence/03` → `concepts/03` → `concepts/05`.
 
+### FABRIC project permissions
+
+The slice built by `fabric/01` (`deploy_fabric.create_slice`) is **three VMs at one
+site**: alice and bob with 4 cores / 8 GB RAM / 20 GB disk, and the switch with
+4 cores / 8 GB RAM / 40 GB disk (it holds the BMv2 Docker image). They connect
+through four `NIC_Basic` shared NICs and two site-local L2 networks. FABRIC's
+default project limits are **2 cores and 10 GB of disk per VM**, so your project
+needs these permissions before any slice-based notebook will run:
+
+| Permission | Why | Needed |
+|---|---|---|
+| `VM.NoLimitCPU` | 4-core VMs (default limit: 2) | **yes** |
+| `VM.NoLimitDisk` | 20 GB and 40 GB disks (default limit: 10 GB) | **yes** |
+| `VM.NoLimit` | Covers CPU, disk and RAM in one tag; use it instead of the two above | alternative |
+| `Slice.Multisite` | Only if you put Bob or the switch at a different site from Alice (WAN classical-stress mode). The default single-site slice does not need it. | optional |
+
+**Not needed:** `VM.NoLimitRAM` (8 GB is under the default limit),
+`Component.*` (no SmartNIC, GPU, FPGA, NVMe or storage), `Net.FABNetv4Ext` /
+`Net.FABNetv6Ext` (no public IPs), port mirroring, facility ports, or
+`Slice.NoLimitLifetime` (nothing extends the slice lease).
+
+Without the CPU and disk permissions the slice submit fails with errors like
+*"Your project is lacking VM.NoLimitCPU or VM.NoLimit tag to provision VM with
+more than 2 cores"*. The project owner can request them in the FABRIC portal
+under *Experiments → Projects & Slices → (project) → Request Permissions*.
+`00_overview` and the unit tests need no slice and no permissions.
+
 ### Install
 
 ```bash

@@ -53,6 +53,13 @@ Enter these in the Artifact Manager UI (or via the REST API — fields below map
 > up, run, sweep, analyse), sequence/ (the distributed runtime, E91) and concepts/
 > (eavesdropper, reconciliation, repeaters, security depth, distributed computing).
 > See README.md, docs/ASSUMPTIONS.md, docs/SPEC.md, docs/ROADMAP.md.
+>
+> **Required FABRIC project permissions:** VM.NoLimitCPU and VM.NoLimitDisk (or
+> the umbrella VM.NoLimit). The slice is three VMs at one site (4 cores, 8 GB RAM,
+> 20/20/40 GB disk, NIC_Basic, site-local L2), above FABRIC's default 2-core /
+> 10 GB-disk per-VM limits. Slice.Multisite is needed only for the optional
+> cross-site mode. No SmartNIC, GPU, FPGA, NVMe, storage, public-IP (FABNetv4Ext/
+> v6Ext) or lifetime permissions are used.
 
 ### description_long — HTML (if the field renders HTML)
 
@@ -98,6 +105,18 @@ physics; unavailable backends are reported as SKIPPED, never a false pass.</p>
       QBER/key-rate sweep figures vs distance and attenuation).</li>
   <li>One-command FABRIC deployment, the P4 program, the quantum-node emulator,
       a cross-validation framework, and a unit-test suite.</li>
+</ul>
+
+<h4>Required FABRIC project permissions</h4>
+<ul>
+  <li><strong>Required:</strong> <code>VM.NoLimitCPU</code> and <code>VM.NoLimitDisk</code>
+      (or the umbrella <code>VM.NoLimit</code>). The slice is three VMs at one site
+      (4 cores, 8&nbsp;GB RAM, 20/20/40&nbsp;GB disk), above FABRIC's default
+      2-core / 10&nbsp;GB-disk per-VM limits.</li>
+  <li><strong>Optional:</strong> <code>Slice.Multisite</code>, only for the cross-site
+      (WAN classical-stress) mode.</li>
+  <li><strong>Not used:</strong> SmartNIC, GPU, FPGA, NVMe or storage components,
+      public IPs (<code>Net.FABNetv4Ext</code>/<code>v6Ext</code>), or extended lifetime.</li>
 </ul>
 
 <p><strong>License:</strong> Apache-2.0.
